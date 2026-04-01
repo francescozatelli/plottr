@@ -285,6 +285,16 @@ class FigureMaker(BaseFM):
             x = x[::stride]
             y = y[::stride]
 
+        # Use explicit finite ranges for robust autoscaling across pyqtgraph versions.
+        finite = np.isfinite(x) & np.isfinite(y)
+        x_rng = None
+        y_rng = None
+        if np.any(finite):
+            xf = x[finite]
+            yf = y[finite]
+            x_rng = (float(np.min(xf)), float(np.max(xf)))
+            y_rng = (float(np.min(yf)), float(np.max(yf)))
+
         #plot either line or scatter depending on what graph is being requested
         if plotItem.plotDataType in [PlotDataType.line1d, PlotDataType.log10_line1d]:
             curve = subPlot.plot.plot(x, y, name=name,
@@ -292,15 +302,26 @@ class FigureMaker(BaseFM):
                                       symbolPen=None, symbolSize=symbolSize)
             curve.setClipToView(True)
             curve.setDownsampling(auto=True, method='peak')
+            subPlot.plot.enableAutoRange(axis='xy', enable=True)
+            subPlot.plot.autoRange()
+            if x_rng is not None and y_rng is not None:
+                subPlot.plot.setXRange(*x_rng, padding=0.03)
+                subPlot.plot.setYRange(*y_rng, padding=0.06)
             return curve
         else: #plotItem.plotDataType is either PlotDataType.scatter1d or PlotDataType.log10_scatter1d
             if x.size > max_scatter_points:
                 stride = int(np.ceil(x.size / max_scatter_points))
                 x = x[::stride]
                 y = y[::stride]
-            return subPlot.plot.plot(x, y, name=name,
-                                     pen=None, symbol=symbol, symbolBrush=color,
-                                     symbolPen=None, symbolSize=symbolSize)
+            curve = subPlot.plot.plot(x, y, name=name,
+                                      pen=None, symbol=symbol, symbolBrush=color,
+                                      symbolPen=None, symbolSize=symbolSize)
+            subPlot.plot.enableAutoRange(axis='xy', enable=True)
+            subPlot.plot.autoRange()
+            if x_rng is not None and y_rng is not None:
+                subPlot.plot.setXRange(*x_rng, padding=0.03)
+                subPlot.plot.setYRange(*y_rng, padding=0.06)
+            return curve
 
     def _colorPlot(self, plotItem: PlotItem) -> None:
         subPlot = self.subPlotFromId(plotItem.subPlot)

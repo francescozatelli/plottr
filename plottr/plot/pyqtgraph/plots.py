@@ -98,6 +98,8 @@ class PlotWithColorbar(PlotBase):
         self.imageXVals: Optional[np.ndarray] = None
         self.imageYVals: Optional[np.ndarray] = None
         self.imageZVals: Optional[np.ndarray] = None
+        self.imageXGrid: Optional[np.ndarray] = None
+        self.imageYGrid: Optional[np.ndarray] = None
         self.imageRect: Optional[QtCore.QRectF] = None
 
     def _getColormap(self, name: str) -> pg.ColorMap:
@@ -140,6 +142,8 @@ class PlotWithColorbar(PlotBase):
         self.imageXVals = None
         self.imageYVals = None
         self.imageZVals = None
+        self.imageXGrid = None
+        self.imageYGrid = None
         self.imageRect = None
         self.plot.clear()
         try:
@@ -162,28 +166,41 @@ class PlotWithColorbar(PlotBase):
 
         self.img = pg.ImageItem()
         self.plot.addItem(self.img)
-        self.img.setImage(z)
+
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
+        z_arr = np.asarray(z)
+
+        self.img.setImage(z_arr)
         x_finite = x_arr[np.isfinite(x_arr)]
         y_finite = y_arr[np.isfinite(y_arr)]
         if x_finite.size > 0 and y_finite.size > 0:
-            xmin, xmax = float(x_finite.min()), float(x_finite.max())
-            ymin, ymax = float(y_finite.min()), float(y_finite.max())
-            rect = QtCore.QRectF(xmin, ymin, xmax - xmin, ymax - ymin)
+            rect = QtCore.QRectF(
+                float(x_finite.min()),
+                float(y_finite.min()),
+                float(x_finite.max() - x_finite.min()),
+                float(y_finite.max() - y_finite.min())
+            )
             self.img.setRect(rect)
             self.imageRect = rect
 
-        self.imageZVals = np.asarray(z)
-        if np.asarray(x).ndim == 2:
-            self.imageXVals = np.asarray(x)[0, :]
+        self.imageZVals = np.asarray(z_arr)
+        if x_arr.ndim == 2 and y_arr.ndim == 2 and x_arr.shape == z_arr.shape and y_arr.shape == z_arr.shape:
+            self.imageXGrid = np.asarray(x_arr, dtype=float)
+            self.imageYGrid = np.asarray(y_arr, dtype=float)
         else:
-            self.imageXVals = np.asarray(x)
+            self.imageXGrid = None
+            self.imageYGrid = None
 
-        if np.asarray(y).ndim == 2:
-            self.imageYVals = np.asarray(y)[:, 0]
+        if x_arr.ndim == 2 and x_arr.shape == z_arr.shape:
+            self.imageXVals = np.asarray(np.nanmedian(x_arr, axis=0), dtype=float)
         else:
-            self.imageYVals = np.asarray(y)
+            self.imageXVals = np.asarray(x_arr, dtype=float).reshape(-1)
+
+        if y_arr.ndim == 2 and y_arr.shape == z_arr.shape:
+            self.imageYVals = np.asarray(np.nanmedian(y_arr, axis=1), dtype=float)
+        else:
+            self.imageYVals = np.asarray(y_arr, dtype=float).reshape(-1)
 
         self.colorbar.setImageItem(self.img)
         z_min = float(np.nanmin(z))
@@ -273,18 +290,40 @@ class PlotWithColorbar(PlotBase):
         z_val: Optional[float] = None
 
         if self.imageZVals is not None and self.imageXVals is not None and self.imageYVals is not None:
-            if self.img is not None and self.imageRect is not None and self.imageZVals.ndim == 2:
-                rect = self.imageRect
-                if rect.width() > 0 and rect.height() > 0 and rect.contains(QtCore.QPointF(x, y)):
-                    nx = self.imageZVals.shape[1]
-                    ny = self.imageZVals.shape[0]
-                    tx = (x - rect.left()) / rect.width()
-                    ty = (y - rect.top()) / rect.height()
-                    ix = int(np.clip(np.rint(tx * (nx - 1)), 0, nx - 1))
-                    iy = int(np.clip(np.rint(ty * (ny - 1)), 0, ny - 1))
-                    z = self.imageZVals[iy, ix]
-                    if np.isfinite(z):
-                        z_val = float(z)
+            if self.imageZVals.ndim == 2:
+                if self.imageXGrid is not None and self.imageYGrid is not None:
+                    xg = self.imageXGrid
+                    yg = self.imageYGrid
+                    zg = self.imageZVals
+                    finite = np.isfinite(xg) & np.isfinite(yg) & np.isfinite(zg)
+                    if np.any(finite):
+                        x_min = float(np.nanmin(xg[finite]))
+                        x_max = float(np.nanmax(xg[finite]))
+                        y_min = float(np.nanmin(yg[finite]))
+                        y_max = float(np.nanmax(yg[finite]))
+                        if x_min <= x <= x_max and y_min <= y <= y_max:
+                            dx = xg[finite] - x
+                            dy = yg[finite] - y
+                            dist2 = dx * dx + dy * dy
+                            idx = int(np.argmin(dist2))
+                            z = zg[finite][idx]
+                            if np.isfinite(z):
+                                z_val = float(z)
+                else:
+                    x_vals = np.asarray(self.imageXVals, dtype=float).reshape(-1)
+                    y_vals = np.asarray(self.imageYVals, dtype=float).reshape(-1)
+                    if x_vals.size > 0 and y_vals.size > 0:
+                        x_min = float(np.nanmin(x_vals))
+                        x_max = float(np.nanmax(x_vals))
+                        y_min = float(np.nanmin(y_vals))
+                        y_max = float(np.nanmax(y_vals))
+                        if x_min <= x <= x_max and y_min <= y <= y_max:
+                            ix = int(np.nanargmin(np.abs(x_vals - x)))
+                            iy = int(np.nanargmin(np.abs(y_vals - y)))
+                            if 0 <= iy < self.imageZVals.shape[0] and 0 <= ix < self.imageZVals.shape[1]:
+                                z = self.imageZVals[iy, ix]
+                                if np.isfinite(z):
+                                    z_val = float(z)
 
         elif self.scatterZVals is not None and self.scatterXVals is not None and self.scatterYVals is not None:
             if self.scatterXVals.size > 0:

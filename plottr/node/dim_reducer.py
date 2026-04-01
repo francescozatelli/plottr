@@ -9,7 +9,7 @@ from typing_extensions import TypedDict
 import numpy as np
 
 from .node import Node, updateOption, NodeWidget
-from ..data.datadict import MeshgridDataDict, DataDict, DataDictBase
+from ..data.datadict import MeshgridDataDict, DataDict, DataDictBase, datadict_to_meshgrid
 from .. import QtCore, QtWidgets, Signal, Slot
 from plottr.icons import get_xySelectIcon
 
@@ -47,6 +47,33 @@ def selectAxisElement(arr: np.ndarray, index: int, axis: int) -> np.ndarray:
     return np.squeeze(sliceAxis(arr, np.s_[index:index+1:], axis), axis=axis)
 
 
+def averageAxis(arr: np.ndarray, axis: int,
+                start: Optional[int] = None,
+                stop: Optional[int] = None) -> np.ndarray:
+    """
+    Average along a selected axis, optionally restricted to an index range.
+
+    :param arr: input array
+    :param axis: dimension on which to perform the averaging
+    :param start: first index (inclusive)
+    :param stop: last index (inclusive)
+    :return: reduced array
+    """
+    if start is None and stop is None:
+        return np.mean(arr, axis=axis)
+
+    naxvals = arr.shape[axis]
+    lo = 0 if start is None else int(start)
+    hi = (naxvals - 1) if stop is None else int(stop)
+    lo = max(0, min(lo, naxvals - 1))
+    hi = max(0, min(hi, naxvals - 1))
+    if lo > hi:
+        lo, hi = hi, lo
+
+    sliced = sliceAxis(arr, np.s_[lo:hi+1:], axis)
+    return np.mean(sliced, axis=axis)
+
+
 # Translation between reduction functions and convenient naming
 @unique
 class ReductionMethod(Enum):
@@ -58,7 +85,7 @@ class ReductionMethod(Enum):
 #: mapping from reduction method Enum to functions
 reductionFunc: Dict[ReductionMethod, Callable[..., Any]] = {
     ReductionMethod.elementSelection: selectAxisElement,
-    ReductionMethod.average: np.mean,
+    ReductionMethod.average: averageAxis,
 }
 
 
@@ -276,6 +303,10 @@ class DimensionReductionAssignmentWidget(DimensionAssignmentWidget):
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
 
+        self.availableChoices[DataDict] += [
+            ReductionMethod.average.value,
+            ReductionMethod.elementSelection.value,
+        ]
         self.availableChoices[MeshgridDataDict] += [
             ReductionMethod.average.value,
             ReductionMethod.elementSelection.value,
@@ -285,7 +316,15 @@ class DimensionReductionAssignmentWidget(DimensionAssignmentWidget):
         role, opts = super().getRole(name)
 
         if role == ReductionMethod.elementSelection.value:
-            opts['index'] = self.choices[name]['optionsWidget'].value()
+            w = self.choices[name]['optionsWidget']
+            if w is not None:
+                opts['index'] = w.value()
+        elif role == ReductionMethod.average.value:
+            w = self.choices[name]['optionsWidget']
+            if w is not None:
+                start, stop = w.values()
+                opts['start'] = int(start)
+                opts['stop'] = int(stop)
 
         return role, opts
 
@@ -301,38 +340,72 @@ class DimensionReductionAssignmentWidget(DimensionAssignmentWidget):
             # only create the slider widget if it doesn't exist yet
             if (self.itemWidget(item, 2) is None) or \
                     (self.choices[dim]['optionsWidget'] is None):
-                self.setNewSlider(dim, item)
+                self.setNewElementSelector(dim, item, **kw)
+        elif role == ReductionMethod.average.value:
+            if (self.itemWidget(item, 2) is None) or \
+                    (self.choices[dim]['optionsWidget'] is None):
+                self.setNewAverageSelector(dim, item, **kw)
 
     def setShapes(self, shapes: Dict[str, Dict[int, int]]) -> None:
         oldShapes = self._dataShapes
         super().setShapes(shapes)
         for dim, values in shapes.items():
             if dim in self.choices:
-                # Only element selection has a slider that needs to be updated.
-                if self.getRole(dim)[0] == ReductionMethod.elementSelection.value:
-                    # If this shape did not change, don't update the slider.
-                    if oldShapes is not None:
-                        if values != oldShapes[dim]:
-                            self.setNewSlider(dim, self.findItems(dim, QtCore.Qt.MatchExactly, 0)[0])
+                role = self.getRole(dim)[0]
+                if role in [ReductionMethod.elementSelection.value, ReductionMethod.average.value]:
+                    # If this shape did not change, don't update controls.
+                    if oldShapes is not None and values == oldShapes[dim]:
+                        continue
+                    item = self.findItems(dim, QtCore.Qt.MatchExactly, 0)[0]
+                    if role == ReductionMethod.elementSelection.value:
+                        self.setNewElementSelector(dim, item)
+                    elif role == ReductionMethod.average.value:
+                        self.setNewAverageSelector(dim, item)
 
-    def setNewSlider(self, dim: str, item: QtWidgets.QTreeWidgetItem) -> None:
+    def _axisValues(self, dim: str) -> np.ndarray:
+        """Return 1D coordinate values for a dimension in index order."""
+        assert self._dataStructure is not None
+        assert self._dataShapes is not None
+        axidx = self._dataStructure.axes().index(dim)
+        naxvals = self._dataShapes[dim][axidx]
+
+        vals = np.asarray(self._dataStructure.data_vals(dim))
+        if vals.ndim == 0:
+            return np.array([vals.item()])
+
+        if vals.ndim > 1:
+            index = [0] * vals.ndim
+            index[axidx] = slice(None)
+            vals = np.asarray(vals[tuple(index)])
+
+        vals = np.asarray(vals).reshape(-1)
+        if vals.size != naxvals:
+            vals = np.linspace(0, naxvals - 1, naxvals)
+        return vals
+
+    def setNewElementSelector(self, dim: str, item: QtWidgets.QTreeWidgetItem,
+                              **kw: Any) -> None:
         assert self._dataStructure is not None
         assert self._dataShapes is not None
         # get the number of elements in this dimension
         axidx = self._dataStructure.axes().index(dim)
         naxvals = self._dataShapes[dim][axidx]
+        axvals = self._axisValues(dim)
 
         previousSlider = self.itemWidget(item, 2)
-        sliderValue = 0
-        if isinstance(previousSlider, QtWidgets.QSlider):
+        sliderValue = int(kw.get('index', 0))
+        if hasattr(previousSlider, 'value'):
             sliderValue = previousSlider.value()
+        sliderValue = max(0, min(sliderValue, naxvals - 1))
 
-        w = self.elementSelectionSlider(nvals=naxvals, value=sliderValue)
+        w = self.elementSelectionControl(nvals=naxvals,
+                                         values=axvals,
+                                         value=sliderValue)
         w.valueChanged.connect(lambda x: self.elementSelectionSliderChange(dim))
 
         scaling = int(np.rint(self.logicalDpiX() / 96.0))
-        width = 150 + 50 * (scaling - 1)
-        height = 22 * scaling
+        width = 220 + 60 * (scaling - 1)
+        height = 28 * scaling
         w.setMinimumSize(width, height)
         w.setMaximumHeight(height)
 
@@ -341,18 +414,144 @@ class DimensionReductionAssignmentWidget(DimensionAssignmentWidget):
         self.setElementSelectionInfo(dim, item.text(3).split(' (')[0])
         self.updateSizes()
 
-    def elementSelectionSlider(self, nvals: int, value: int = 0) -> QtWidgets.QSlider:
-        w = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        w.setMinimum(0)
-        w.setMaximum(nvals - 1)
-        w.setSingleStep(1)
-        w.setPageStep(1)
-        w.setTickInterval(max(1, nvals//10))
-        w.setTickPosition(QtWidgets.QSlider.TicksBelow)
-        w.setValue(value)
-        return w
+    def setNewAverageSelector(self, dim: str, item: QtWidgets.QTreeWidgetItem,
+                              **kw: Any) -> None:
+        assert self._dataStructure is not None
+        assert self._dataShapes is not None
+        axidx = self._dataStructure.axes().index(dim)
+        naxvals = self._dataShapes[dim][axidx]
+        axvals = self._axisValues(dim)
+
+        previous = self.itemWidget(item, 2)
+        start = int(kw.get('start', 0))
+        stop = int(kw.get('stop', naxvals - 1))
+        if hasattr(previous, 'values'):
+            pstart, pstop = previous.values()
+            start, stop = int(pstart), int(pstop)
+
+        start = max(0, min(start, naxvals - 1))
+        stop = max(0, min(stop, naxvals - 1))
+
+        w = self.averageRangeControl(nvals=naxvals,
+                                     values=axvals,
+                                     start=start,
+                                     stop=stop)
+        w.rangeChanged.connect(lambda a, b: self.averageRangeChange(dim))
+
+        scaling = int(np.rint(self.logicalDpiX() / 96.0))
+        width = 260 + 80 * (scaling - 1)
+        height = 52 * scaling
+        w.setMinimumSize(width, height)
+        w.setMaximumHeight(height)
+
+        self.choices[dim]['optionsWidget'] = w
+        self.setItemWidget(item, 2, w)
+        self.setAverageSelectionInfo(dim)
+        self.updateSizes()
+
+    def elementSelectionControl(self, nvals: int,
+                                values: np.ndarray,
+                                value: int = 0) -> QtWidgets.QWidget:
+        class _ElementSelectionControl(QtWidgets.QWidget):
+            valueChanged = Signal(int)
+
+            def __init__(self, n: int, vals: np.ndarray, v: int,
+                         parent: Optional[QtWidgets.QWidget] = None):
+                super().__init__(parent)
+                self._vals = vals
+                self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+                self.slider.setMinimum(0)
+                self.slider.setMaximum(max(0, n - 1))
+                self.slider.setSingleStep(1)
+                self.slider.setPageStep(1)
+                self.slider.setTickInterval(max(1, n // 10))
+                self.slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+
+                self.label = QtWidgets.QLabel(self)
+                self.label.setMinimumWidth(80)
+
+                layout = QtWidgets.QHBoxLayout(self)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.addWidget(self.slider)
+                layout.addWidget(self.label)
+
+                self.slider.valueChanged.connect(self._updateLabel)
+                self.slider.valueChanged.connect(self.valueChanged.emit)
+                self.slider.setValue(v)
+                self._updateLabel(self.slider.value())
+
+            def _updateLabel(self, idx: int) -> None:
+                idx = int(max(0, min(idx, self._vals.size - 1)))
+                self.label.setText(f"{self._vals[idx]:.6g}")
+
+            def value(self) -> int:
+                return int(self.slider.value())
+
+        return _ElementSelectionControl(nvals, values, value)
+
+    def averageRangeControl(self, nvals: int,
+                            values: np.ndarray,
+                            start: int = 0,
+                            stop: Optional[int] = None) -> QtWidgets.QWidget:
+        class _AverageRangeControl(QtWidgets.QWidget):
+            rangeChanged = Signal(int, int)
+
+            def __init__(self, n: int, vals: np.ndarray,
+                         s: int, e: int,
+                         parent: Optional[QtWidgets.QWidget] = None):
+                super().__init__(parent)
+                self._vals = vals
+
+                self.startSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+                self.stopSlider = QtWidgets.QSlider(QtCore.Qt.Horizontal, self)
+                for sl in [self.startSlider, self.stopSlider]:
+                    sl.setMinimum(0)
+                    sl.setMaximum(max(0, n - 1))
+                    sl.setSingleStep(1)
+                    sl.setPageStep(1)
+                    sl.setTickInterval(max(1, n // 10))
+                    sl.setTickPosition(QtWidgets.QSlider.TicksBelow)
+
+                self.infoLabel = QtWidgets.QLabel(self)
+
+                layout = QtWidgets.QVBoxLayout(self)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(2)
+                layout.addWidget(self.startSlider)
+                layout.addWidget(self.stopSlider)
+                layout.addWidget(self.infoLabel)
+
+                self.startSlider.valueChanged.connect(self._updateRange)
+                self.stopSlider.valueChanged.connect(self._updateRange)
+
+                if e is None:
+                    e = n - 1
+                self.startSlider.setValue(max(0, min(s, n - 1)))
+                self.stopSlider.setValue(max(0, min(e, n - 1)))
+                self._updateRange()
+
+            def _updateRange(self) -> None:
+                lo = min(self.startSlider.value(), self.stopSlider.value())
+                hi = max(self.startSlider.value(), self.stopSlider.value())
+                self.infoLabel.setText(
+                    f"avg [{lo}:{hi}] = {self._vals[lo]:.6g} .. {self._vals[hi]:.6g}"
+                )
+                self.rangeChanged.emit(lo, hi)
+
+            def values(self) -> Tuple[int, int]:
+                lo = min(self.startSlider.value(), self.stopSlider.value())
+                hi = max(self.startSlider.value(), self.stopSlider.value())
+                return int(lo), int(hi)
+
+        return _AverageRangeControl(nvals, values, start, stop)
 
     def elementSelectionSliderChange(self, dim: str) -> None:
+        self.setElementSelectionInfo(dim)
+        roles = self.getRoles()
+        self.rolesChanged.emit(roles)
+
+    def averageRangeChange(self, dim: str) -> None:
+        self.setAverageSelectionInfo(dim)
         roles = self.getRoles()
         self.rolesChanged.emit(roles)
 
@@ -369,6 +568,19 @@ class DimensionReductionAssignmentWidget(DimensionAssignmentWidget):
             text = f"({idx + 1}/{naxvals})"
             if value is not None:
                 text = value + ' ' + text
+        self.setDimInfo(dim, text)
+
+    def setAverageSelectionInfo(self, dim: str) -> None:
+        assert self._dataStructure is not None
+        assert self._dataShapes is not None
+        roles = self.getRoles()
+        axidx = self._dataStructure.axes().index(dim)
+        naxvals = self._dataShapes[dim][axidx]
+        text = ''
+        start = roles[dim]['options'].get('start', 0)
+        stop = roles[dim]['options'].get('stop', naxvals - 1)
+        if naxvals > 0:
+            text = f"({start + 1}:{stop + 1}/{naxvals})"
         self.setDimInfo(dim, text)
 
 
@@ -414,8 +626,8 @@ class DimensionReducerNodeWidget(NodeWidget[DimensionReductionAssignmentWidget])
         for dimName, rolesOptions in roles.items():
             role = rolesOptions['role']
             opts = rolesOptions['options']
-            method = ReductionMethod(role)
-            if method is not None:
+            if role in [e.value for e in ReductionMethod]:
+                method = ReductionMethod(role)
                 reductions[dimName] = method, [], opts
 
         return reductions
@@ -528,6 +740,24 @@ class DimensionReducer(Node):
     def _applyDimReductions(self, data: DataDictBase) -> Optional[DataDictBase]:
         """Apply the reductions"""
         reductionValues: Dict[str, float] = {}  # Holds the temporary reduction values before saving them.
+
+        # QCoDeS data often arrives as DataDict even when it is logically gridded.
+        # For built-in reduction methods, try to make a meshgrid first so linecuts
+        # and averaging can be applied consistently from the UI.
+        if not isinstance(data, MeshgridDataDict):
+            has_builtin_reductions = any(
+                isinstance(reduction[0], ReductionMethod)
+                for reduction in self._reductions.values()
+                if reduction is not None
+            )
+            if has_builtin_reductions and isinstance(data, DataDict):
+                try:
+                    data = datadict_to_meshgrid(data)
+                except Exception as exc:
+                    self.node_logger.warning(
+                        f"Could not convert DataDict to meshgrid for reductions: {exc}. "
+                        "Falling back to axis-removal behavior."
+                    )
 
         if self._targetNames is not None:
             dnames = self._targetNames
@@ -648,14 +878,6 @@ class DimensionReducer(Node):
                     f'Needs to be callable or a ReductionMethod type.'
                 )
                 return False
-
-            # reduction methods are only defined for grid data.
-            # remove reduction methods if we're not on a grid.
-            if isinstance(fun, ReductionMethod) and not isinstance(data, MeshgridDataDict):
-                self.node_logger.info(f'Reduction set for axis {ax} is only suited for '
-                                   f'grid data. Removing.')
-                delete.append(ax)
-                continue
 
             # set the reduction in the correct format.
             self._reductions[ax] = (fun, arg, kw)

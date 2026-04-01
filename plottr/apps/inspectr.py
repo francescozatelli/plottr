@@ -612,6 +612,10 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         )
 
         if dbdf_delta.size == 0:
+            # Even when the overview table does not change, the currently
+            # plotted run may have new data points appended. Refresh the
+            # embedded plot in place so live plotting stays reactive.
+            self._refreshEmbeddedPlot()
             return
 
         self.dbdf = pandas.concat([
@@ -624,6 +628,10 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         new_ids = dbdf_delta.index.values
         new_ids = new_ids[new_ids > latest_run_id]
         self._showNewRuns(new_ids)
+
+        # Keep the currently plotted run live-updated without requiring
+        # reselection from the run list.
+        self._refreshEmbeddedPlot(updated_ids=set(int(i) for i in dbdf_delta.index.values))
 
     @Slot(float)
     def setMonitorInterval(self, val: float) -> None:
@@ -738,6 +746,26 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self.runList.setCurrentItem(items[0])
         self.runList.scrollToItem(items[0], QtWidgets.QAbstractItemView.PositionAtCenter)
         return True
+
+    def _refreshEmbeddedPlot(self, updated_ids: Optional[Set[int]] = None) -> None:
+        """Refresh currently embedded plot in place for live updates.
+
+        If ``updated_ids`` is provided, only refresh when the plotted run
+        appears in that set.
+        """
+        if self._embeddedPlotWindow is None or self._plottedRunId is None:
+            return
+
+        if updated_ids is not None and self._plottedRunId not in updated_ids:
+            return
+
+        win = self._embeddedPlotWindow
+        if win.loaderNode is None:
+            return
+
+        # Do not reset defaults or selected variables; just pull newly appended
+        # records for the currently visible run.
+        win.refreshData()
 
     @Slot(int)
     def plotRun(self, runId: int) -> None:
