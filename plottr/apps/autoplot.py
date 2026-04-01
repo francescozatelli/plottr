@@ -303,8 +303,12 @@ class QCAutoPlotMainWindow(AutoPlotMainWindow):
 
 
 def autoplotQcodesDataset(log: bool = False,
-                          pathAndId: Union[Tuple[str, int], None] = None) \
-        -> Tuple[Flowchart, QCAutoPlotMainWindow]:
+              pathAndId: Union[Tuple[str, int], None] = None,
+              parent: Optional[QtWidgets.QWidget] = None,
+              monitor: bool = True,
+              showWindow: bool = True,
+              widgetOptions: Optional[dict] = None) \
+    -> Tuple[Flowchart, QCAutoPlotMainWindow]:
     """
     Sets up a simple flowchart consisting of a data selector,
     an xy-axes selector, and creates a GUI together with an autoplot
@@ -323,19 +327,21 @@ def autoplotQcodesDataset(log: bool = False,
         ('plot', PlotNode)
     )
 
-    widgetOptions = {
-        "Data selection": dict(visible=True,
-                               dockArea=QtCore.Qt.TopDockWidgetArea),
-        "Dimension assignment": dict(visible=True,
-                                     dockArea=QtCore.Qt.TopDockWidgetArea),
-    }
+    if widgetOptions is None:
+        widgetOptions = {
+            "Data selection": dict(visible=True,
+                                   dockArea=QtCore.Qt.TopDockWidgetArea),
+            "Dimension assignment": dict(visible=True,
+                                         dockArea=QtCore.Qt.TopDockWidgetArea),
+        }
 
-    win = QCAutoPlotMainWindow(fc, pathAndId=pathAndId,
+    win = QCAutoPlotMainWindow(fc, parent=parent, pathAndId=pathAndId,
                                widgetOptions=widgetOptions,
-                               monitor=True,
+                               monitor=monitor,
                                loaderName='Data loader',
                                plotWidgetClass=PGAutoPlot)
-    win.show()
+    if showWindow:
+        win.show()
 
     return fc, win
 

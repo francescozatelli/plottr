@@ -71,8 +71,8 @@ class FigureWidget(QtWidgets.QWidget):
         :param plot: plot widget
         :param title: title of the plot
         """
-        max_cols = int(getcfg('main', 'pyqtgraph', 'subplot_max_columns', default=4))
-        max_cols = max(1, min(4, max_cols))
+        max_cols = int(getcfg('main', 'pyqtgraph', 'subplot_max_columns', default=3))
+        max_cols = max(1, min(3, max_cols))
         idx = len(self.subPlots)
         row = idx // max_cols
         col = idx % max_cols

@@ -41,7 +41,7 @@ config = {
         'adaptive_1d_max_points': 200000,
         'adaptive_scatter_max_points': 80000,
         'adaptive_color_scatter_max_points': 80000,
-        'subplot_max_columns': 4,
+        'subplot_max_columns': 3,
         'minimum_plot_size': (400, 400),
         'default_colormap': 'magma_r',
         'colormap_options': ['magma_r', 'magma', 'viridis', 'inferno',

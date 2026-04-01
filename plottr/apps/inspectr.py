@@ -312,6 +312,9 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         super().__init__(parent)
 
         self._plotWindows: Dict[int, WindowDict] = {}
+        self._embeddedFlowchart: Optional[Flowchart] = None
+        self._embeddedPlotWindow: Optional[QCAutoPlotMainWindow] = None
+        self._plottedRunId: Optional[int] = None
 
         self.filepath = dbPath
         self.dbdf: Optional[pandas.DataFrame] = None
@@ -335,16 +338,30 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self._selected_dates: Tuple[str, ...] = ()
         self.runList = RunList()
         self.runInfo = RunInfo()
+        self.plotPanel = QtWidgets.QWidget(self)
+        self.plotPanelLayout = QtWidgets.QVBoxLayout(self.plotPanel)
+        self.plotPanelLayout.setContentsMargins(0, 0, 0, 0)
+        self.plotPanelLayout.setSpacing(0)
+        self.plotPlaceholder = QtWidgets.QLabel('Select a run to plot')
+        self.plotPlaceholder.setAlignment(QtCore.Qt.AlignCenter)
+        self.plotPanelLayout.addWidget(self.plotPlaceholder)
 
-        rightSplitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        rightSplitter.addWidget(self.runList)
-        rightSplitter.addWidget(self.runInfo)
-        rightSplitter.setSizes([400, 200])
+        browserRightSplitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        browserRightSplitter.addWidget(self.runList)
+        browserRightSplitter.addWidget(self.runInfo)
+        browserRightSplitter.setSizes([450, 150])
+
+        browserSplitter = QtWidgets.QSplitter()
+        browserSplitter.addWidget(self.dateList)
+        browserSplitter.addWidget(browserRightSplitter)
+        browserSplitter.setSizes([120, 380])
 
         splitter = QtWidgets.QSplitter()
-        splitter.addWidget(self.dateList)
-        splitter.addWidget(rightSplitter)
-        splitter.setSizes([100, 500])
+        splitter.addWidget(browserSplitter)
+        splitter.addWidget(self.plotPanel)
+        splitter.setSizes([420, 980])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         self.setCentralWidget(splitter)
 
@@ -368,7 +385,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             ('Auto-plot new', QtWidgets.QCheckBox())
         ])
         tt = "If checked, and automatic refresh is running, "
-        tt += " launch plotting window for new datasets automatically."
+        tt += " select and plot new datasets automatically in the right panel."
         self.autoLaunchPlots.setToolTip(tt)
         self.toolbar.addWidget(self.autoLaunchPlots)
 
@@ -432,6 +449,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self.dateList.datesSelected.connect(self.setDateSelection)
         self.dateList.fileDropped.connect(self.loadFullDB)
         self.runList.runSelected.connect(self.setRunSelection)
+        self.runList.runSelected.connect(self.plotRun)
         self.runList.runActivated.connect(self.plotRun)
         self._sendInfo.connect(self.runInfo.setInfo)
         self.monitor.timeout.connect(self.monitorTriggered)
@@ -454,8 +472,15 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if self.refreshDebounce.isActive():
             self.refreshDebounce.stop()
 
-        for runId, info in self._plotWindows.items():
+        for _runId, info in self._plotWindows.items():
             info['window'].close()
+        self._plotWindows.clear()
+
+        if self._embeddedPlotWindow is not None:
+            self._embeddedPlotWindow.close()
+            self._embeddedPlotWindow.deleteLater()
+            self._embeddedPlotWindow = None
+            self._embeddedFlowchart = None
 
     @Slot()
     def showDBPath(self) -> None:
@@ -518,11 +543,13 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if not (self.monitor.isActive() and self.autoLaunchPlots.elements['Auto-plot new'].isChecked()):
             return
 
-        for run_id in new_run_ids:
-            self.plotRun(run_id)
-            self._plotWindows[run_id]['window'].setMonitorInterval(
-                self.monitorInput.spin.value()
-            )
+        new_ids = list(new_run_ids)
+        if len(new_ids) == 0:
+            return
+
+        newest = int(max(new_ids))
+        if not self._selectRunInList(newest):
+            self.plotRun(newest)
 
     def DBLoaded(self, dbdf: pandas.DataFrame) -> None:
         if self.dbdf is not None and dbdf.equals(self.dbdf):
@@ -562,7 +589,9 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         latest_run_id = int(self.dbdf.index.values.max())
         self.latestRunId = latest_run_id
 
-        active_run_ids: Set[int] = set(self._plotWindows.keys())
+        active_run_ids: Set[int] = set()
+        if self._plottedRunId is not None:
+            active_run_ids.add(self._plottedRunId)
         selected_items = self.runList.selectedItems()
         if len(selected_items) > 0:
             active_run_ids.add(int(selected_items[0].text(0)))
@@ -665,15 +694,65 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
                        'QCoDeS Snapshot': snap}
         self._sendInfo.emit(contentInfo)
 
+    def _ensureEmbeddedPlotWindow(self, runId: int) -> QCAutoPlotMainWindow:
+        assert self.filepath is not None
+
+        if self._embeddedPlotWindow is None:
+            # Keep monitor disabled here; inspectr handles refresh cycles.
+            fc, win = autoplotQcodesDataset(
+                pathAndId=(self.filepath, runId),
+                parent=self.plotPanel,
+                monitor=False,
+                showWindow=False,
+                widgetOptions={
+                    "Data selection": dict(visible=True),
+                    "Dimension assignment": dict(visible=False),
+                },
+            )
+            win.setWindowFlags(QtCore.Qt.Widget)
+            win.menuBar().hide()
+
+            self._embeddedFlowchart = fc
+            self._embeddedPlotWindow = win
+            self.plotPanelLayout.removeWidget(self.plotPlaceholder)
+            self.plotPlaceholder.hide()
+            self.plotPanelLayout.addWidget(win)
+            win.show()
+
+        return self._embeddedPlotWindow
+
+    def _selectRunInList(self, runId: int) -> bool:
+        items = self.runList.findItems(str(runId), QtCore.Qt.MatchExactly)
+        if len(items) == 0:
+            return False
+
+        self.runList.setCurrentItem(items[0])
+        self.runList.scrollToItem(items[0], QtWidgets.QAbstractItemView.PositionAtCenter)
+        return True
+
     @Slot(int)
     def plotRun(self, runId: int) -> None:
         assert self.filepath is not None
-        fc, win = autoplotQcodesDataset(pathAndId=(self.filepath, runId))
-        self._plotWindows[runId] = {
-            'flowchart': fc,
-            'window': win,
-        }
+        win = self._ensureEmbeddedPlotWindow(runId)
+        if win.loaderNode is None:
+            return
+
+        try:
+            win.fc.nodes()['Dimension assignment'].dimensionRoles = {}
+            win.fc.nodes()['Data selection'].selectedData = []
+        except Exception:
+            pass
+
+        win.loaderNode.pathAndId = (self.filepath, runId)
+        win._initialized = False
+        win.refreshData()
+        data_out = win.loaderNode.outputValues().get('dataOut')
+        if data_out is not None:
+            win.setDefaults(data_out)
+            win._initialized = True
         win.showTime()
+
+        self._plottedRunId = runId
 
     def setTag(self, item: QtWidgets.QTreeWidgetItem, tag: str) -> None:
         # set tag in the database
