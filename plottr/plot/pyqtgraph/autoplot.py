@@ -353,38 +353,84 @@ class FigureMaker(BaseFM):
         if z_arr.ndim != 2:
             return x_arr, y_arr, z_arr
 
-        nx = z_arr.shape[1]
-        ny = z_arr.shape[0]
+        ny, nx = z_arr.shape
 
-        def _axis_vector(arr: np.ndarray, prefer_x: bool) -> Optional[np.ndarray]:
+        def _varying_axis_and_vector(arr: np.ndarray) -> tuple[Optional[int], Optional[np.ndarray]]:
+            """Return which z-axis the coordinate varies along and its 1D vector.
+
+            Returns:
+            - axis 0 with vector length ny when coordinate varies by rows
+            - axis 1 with vector length nx when coordinate varies by columns
+            - (None, None) if not enough information
+            """
             if arr.ndim == 1:
-                return np.asarray(arr, dtype=float)
+                if arr.size == ny:
+                    return 0, np.asarray(arr, dtype=float)
+                if arr.size == nx:
+                    return 1, np.asarray(arr, dtype=float)
+                return None, None
+
             if arr.ndim == 2 and arr.shape == z_arr.shape:
-                if prefer_x:
-                    return np.asarray(np.nanmedian(arr, axis=0), dtype=float)
-                return np.asarray(np.nanmedian(arr, axis=1), dtype=float)
-            return None
+                with np.errstate(invalid='ignore'):
+                    d0 = np.nanmedian(np.abs(np.diff(arr, axis=0)))
+                    d1 = np.nanmedian(np.abs(np.diff(arr, axis=1)))
 
-        x_vec = _axis_vector(x_arr, prefer_x=True)
-        y_vec = _axis_vector(y_arr, prefer_x=False)
+                if np.isfinite(d0) and (not np.isfinite(d1) or d0 > d1):
+                    return 0, np.asarray(np.nanmedian(arr, axis=1), dtype=float)
+                if np.isfinite(d1):
+                    return 1, np.asarray(np.nanmedian(arr, axis=0), dtype=float)
 
-        if x_vec is not None and x_vec.size == nx:
-            finite = np.isfinite(x_vec)
-            if np.count_nonzero(finite) >= 2:
-                x_for_sort = np.where(finite, x_vec, np.nanmax(x_vec[finite]) + 1.0)
-                x_idx = np.argsort(x_for_sort)
-                x_arr = x_arr[:, x_idx] if (x_arr.ndim == 2 and x_arr.shape == z_arr.shape) else x_arr[x_idx]
-                y_arr = y_arr[:, x_idx] if (y_arr.ndim == 2 and y_arr.shape == z_arr.shape) else y_arr
-                z_arr = z_arr[:, x_idx]
+            return None, None
 
-        if y_vec is not None and y_vec.size == ny:
-            finite = np.isfinite(y_vec)
-            if np.count_nonzero(finite) >= 2:
-                y_for_sort = np.where(finite, y_vec, np.nanmax(y_vec[finite]) + 1.0)
-                y_idx = np.argsort(y_for_sort)
-                y_arr = y_arr[y_idx, :] if (y_arr.ndim == 2 and y_arr.shape == z_arr.shape) else y_arr[y_idx]
-                x_arr = x_arr[y_idx, :] if (x_arr.ndim == 2 and x_arr.shape == z_arr.shape) else x_arr
-                z_arr = z_arr[y_idx, :]
+        def _stable_sort_idx(vec: np.ndarray) -> Optional[np.ndarray]:
+            finite = np.isfinite(vec)
+            if np.count_nonzero(finite) < 2:
+                return None
+            fill = np.nanmax(vec[finite]) + 1.0
+            sort_vec = np.where(finite, vec, fill)
+            return np.argsort(sort_vec)
+
+        x_var_axis, x_vec = _varying_axis_and_vector(x_arr)
+        if x_vec is not None and x_var_axis is not None:
+            x_idx = _stable_sort_idx(x_vec)
+            if x_idx is not None:
+                if x_var_axis == 0:
+                    z_arr = z_arr[x_idx, :]
+                    if x_arr.ndim == 2 and x_arr.shape == z_arr.shape:
+                        x_arr = x_arr[x_idx, :]
+                    else:
+                        x_arr = x_arr[x_idx]
+                    if y_arr.ndim == 2 and y_arr.shape == z_arr.shape:
+                        y_arr = y_arr[x_idx, :]
+                else:
+                    z_arr = z_arr[:, x_idx]
+                    if x_arr.ndim == 2 and x_arr.shape == z_arr.shape:
+                        x_arr = x_arr[:, x_idx]
+                    else:
+                        x_arr = x_arr[x_idx]
+                    if y_arr.ndim == 2 and y_arr.shape == z_arr.shape:
+                        y_arr = y_arr[:, x_idx]
+
+        y_var_axis, y_vec = _varying_axis_and_vector(y_arr)
+        if y_vec is not None and y_var_axis is not None:
+            y_idx = _stable_sort_idx(y_vec)
+            if y_idx is not None:
+                if y_var_axis == 0:
+                    z_arr = z_arr[y_idx, :]
+                    if y_arr.ndim == 2 and y_arr.shape == z_arr.shape:
+                        y_arr = y_arr[y_idx, :]
+                    else:
+                        y_arr = y_arr[y_idx]
+                    if x_arr.ndim == 2 and x_arr.shape == z_arr.shape:
+                        x_arr = x_arr[y_idx, :]
+                else:
+                    z_arr = z_arr[:, y_idx]
+                    if y_arr.ndim == 2 and y_arr.shape == z_arr.shape:
+                        y_arr = y_arr[:, y_idx]
+                    else:
+                        y_arr = y_arr[y_idx]
+                    if x_arr.ndim == 2 and x_arr.shape == z_arr.shape:
+                        x_arr = x_arr[:, y_idx]
 
         return x_arr, y_arr, z_arr
 
