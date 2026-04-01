@@ -18,6 +18,7 @@ from ..gui import PlotWindow
 from ..gui.widgets import MonitorIntervalInput, SnapshotWidget
 from ..node.data_selector import DataSelector
 from ..node.dim_reducer import XYSelector
+from ..node.dim_reducer import ReductionMethod
 from ..node.filter.correct_offset import SubtractAverage
 from ..node.scaleunits import ScaleUnits
 from ..node.grid import DataGridder, GridOption
@@ -246,6 +247,11 @@ class AutoPlotMainWindow(PlotWindow):
             # Prefer fastest-changing axis on x and slowest-changing on y.
             # This avoids degenerate singleton 2D views for some 3-axis runs.
             drs = {axes[-1]: 'x-axis', axes[0]: 'y-axis'}
+            for ax in axes[1:-1]:
+                # For 3D+ data, default extra dimensions to averaging so a
+                # meaningful plot appears immediately instead of an arbitrary
+                # first-slice that can be empty or unrepresentative.
+                drs[ax] = (ReductionMethod.average, [], {})
         if len(axes) == 1:
             drs = {axes[0]: 'x-axis'}
 

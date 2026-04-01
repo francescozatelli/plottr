@@ -29,7 +29,8 @@ from plottr import QtCore, QtWidgets, Signal, Slot, QtGui, Flowchart
 from .. import log as plottrlog
 from ..data.qcodes_dataset import (get_runs_from_db_as_dataframe,
                                    get_runs_from_db_as_dataframe_filtered,
-                                   get_ds_structure, load_dataset_from)
+                                   get_ds_structure, load_dataset_from,
+                                   ds_to_datadict)
 from plottr.gui.widgets import MonitorIntervalInput, FormLayoutWrapper, dictToTreeWidgetItems
 
 from .autoplot import autoplotQcodesDataset, QCAutoPlotMainWindow
@@ -540,7 +541,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             self.dbWatcher.addPath(fpath)
 
     def _showNewRuns(self, new_run_ids: Iterable[int]) -> None:
-        if not (self.monitor.isActive() and self.autoLaunchPlots.elements['Auto-plot new'].isChecked()):
+        if not self.autoLaunchPlots.elements['Auto-plot new'].isChecked():
             return
 
         new_ids = list(new_run_ids)
@@ -548,6 +549,14 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             return
 
         newest = int(max(new_ids))
+
+        # Ensure the newest run date is part of the active date filter so the
+        # item becomes selectable in the list immediately.
+        if self.dbdf is not None and newest in self.dbdf.index:
+            started_date = str(self.dbdf.at[newest, 'started_date'])
+            if started_date not in self._selected_dates:
+                self.setDateSelection(tuple(sorted(set(self._selected_dates + (started_date,)))))
+
         if not self._selectRunInList(newest):
             self.plotRun(newest)
 
@@ -706,7 +715,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
                 showWindow=False,
                 widgetOptions={
                     "Data selection": dict(visible=True),
-                    "Dimension assignment": dict(visible=False),
+                    "Dimension assignment": dict(visible=True),
                 },
             )
             win.setWindowFlags(QtCore.Qt.Widget)
@@ -743,11 +752,38 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+        # When switching runs, force a fresh dataset load so data-field
+        # dependent UIs (data selection and dimension assignment) are rebuilt.
+        if self._plottedRunId != runId:
+            win.loaderNode.nLoadedRecords = 0
+            win.loaderNode._dataset = None
+
         win.loaderNode.pathAndId = (self.filepath, runId)
         win._initialized = False
         win.refreshData()
         data_out = win.loaderNode.outputValues().get('dataOut')
+
+        # Fallback for cases where loader update does not emit new data due to
+        # record-count semantics; still rebuild selector options for this run.
+        if data_out is None and win.loaderNode._dataset is not None:
+            data_out = ds_to_datadict(win.loaderNode._dataset)
+
         if data_out is not None:
+            shapes = data_out.shapes()
+            dtype = type(data_out)
+            try:
+                data_sel_node = win.fc.nodes()['Data selection']
+                if data_sel_node.ui is not None:
+                    data_sel_node.ui.setData(data_out, shapes, dtype)
+            except Exception:
+                pass
+            try:
+                dim_node = win.fc.nodes()['Dimension assignment']
+                if dim_node.ui is not None:
+                    dim_node.ui.setData(data_out, shapes, dtype)
+            except Exception:
+                pass
+
             win.setDefaults(data_out)
             win._initialized = True
         win.showTime()

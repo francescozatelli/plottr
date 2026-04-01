@@ -255,12 +255,12 @@ class FigureMaker(BaseFM):
         else:
             name = ''
 
-        #flatten and apply data transformations (if applicable)
+        # flatten and apply data transformations (if applicable)
         x = x.flatten()
+        y = y.flatten()
         if plotItem.plotDataType in [PlotDataType.log10_line1d, PlotDataType.log10_scatter1d]:
-            y = 20*np.log(y.flatten())
-        else:
-            y = y.flatten()
+            # Use dB scaling based on log10 of magnitude (NumPy-safe for complex values).
+            y = 20 * self._safeLog10(y)
 
         if self.fftAxis in ['x', 'y']:
             x, y = self._fft1d(x, y)
