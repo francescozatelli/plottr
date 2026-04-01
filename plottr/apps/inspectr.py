@@ -17,7 +17,7 @@ import time
 import sys
 import argparse
 import logging
-from typing import Optional, Sequence, List, Dict, Iterable, Union, cast, Tuple, Mapping
+from typing import Optional, Sequence, List, Dict, Iterable, Union, cast, Tuple, Mapping, Set
 
 from typing_extensions import TypedDict
 
@@ -28,6 +28,7 @@ from plottr import QtCore, QtWidgets, Signal, Slot, QtGui, Flowchart
 
 from .. import log as plottrlog
 from ..data.qcodes_dataset import (get_runs_from_db_as_dataframe,
+                                   get_runs_from_db_as_dataframe_filtered,
                                    get_ds_structure, load_dataset_from)
 from plottr.gui.widgets import MonitorIntervalInput, FormLayoutWrapper, dictToTreeWidgetItems
 
@@ -315,6 +316,9 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self.filepath = dbPath
         self.dbdf: Optional[pandas.DataFrame] = None
         self.monitor = QtCore.QTimer()
+        self.dbWatcher = QtCore.QFileSystemWatcher(self)
+        self.refreshDebounce = QtCore.QTimer(self)
+        self.refreshDebounce.setSingleShot(True)
 
         # flag for determining what has been loaded so far.
         # * None: nothing opened yet.
@@ -431,6 +435,8 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self.runList.runActivated.connect(self.plotRun)
         self._sendInfo.connect(self.runInfo.setInfo)
         self.monitor.timeout.connect(self.monitorTriggered)
+        self.dbWatcher.fileChanged.connect(self.onDBFileChanged)
+        self.refreshDebounce.timeout.connect(self.refreshDB)
 
         if self.filepath is not None:
             self.loadFullDB(self.filepath)
@@ -444,6 +450,9 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
         if self.monitor.isActive():
             self.monitor.stop()
+
+        if self.refreshDebounce.isActive():
+            self.refreshDebounce.stop()
 
         for runId, info in self._plotWindows.items():
             info['window'].close()
@@ -486,9 +495,34 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             # refreshed one.
             self.latestRunId = None
 
+        self._watchCurrentDBFile()
+
         if self.filepath is not None:
             if not self.loadDBThread.isRunning():
                 self.loadDBProcess.setPath(self.filepath)
+
+    def _watchCurrentDBFile(self) -> None:
+        if self.filepath is None:
+            return
+
+        fpath = os.path.abspath(self.filepath)
+        old_paths = list(self.dbWatcher.files())
+        for old in old_paths:
+            if os.path.abspath(old) != fpath:
+                self.dbWatcher.removePath(old)
+
+        if os.path.isfile(fpath) and fpath not in self.dbWatcher.files():
+            self.dbWatcher.addPath(fpath)
+
+    def _showNewRuns(self, new_run_ids: Iterable[int]) -> None:
+        if not (self.monitor.isActive() and self.autoLaunchPlots.elements['Auto-plot new'].isChecked()):
+            return
+
+        for run_id in new_run_ids:
+            self.plotRun(run_id)
+            self._plotWindows[run_id]['window'].setMonitorInterval(
+                self.monitorInput.spin.value()
+            )
 
     def DBLoaded(self, dbdf: pandas.DataFrame) -> None:
         if self.dbdf is not None and dbdf.equals(self.dbdf):
@@ -502,13 +536,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if self.latestRunId is not None:
             idxs = self.dbdf.index.values
             newIdxs = idxs[idxs > self.latestRunId]
-
-            if self.monitor.isActive() and self.autoLaunchPlots.elements['Auto-plot new'].isChecked():
-                for idx in newIdxs:
-                    self.plotRun(idx)
-                    self._plotWindows[idx]['window'].setMonitorInterval(
-                        self.monitorInput.spin.value()
-                    )
+            self._showNewRuns(newIdxs)
 
     @Slot()
     def updateDates(self) -> None:
@@ -520,15 +548,44 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
     ### reloading the db
     @Slot()
     def refreshDB(self) -> None:
-        if self.filepath is not None:
-            if self.loadDBThread.isRunning():
-                return
-            if self.dbdf is not None and self.dbdf.size > 0:
-                self.latestRunId = self.dbdf.index.values.max()
-            else:
-                self.latestRunId = -1
+        if self.filepath is None:
+            return
 
+        if self.loadDBThread.isRunning():
+            return
+
+        if self.dbdf is None or self.dbdf.size == 0:
+            self.latestRunId = -1
             self.loadFullDB()
+            return
+
+        latest_run_id = int(self.dbdf.index.values.max())
+        self.latestRunId = latest_run_id
+
+        active_run_ids: Set[int] = set(self._plotWindows.keys())
+        selected_items = self.runList.selectedItems()
+        if len(selected_items) > 0:
+            active_run_ids.add(int(selected_items[0].text(0)))
+
+        dbdf_delta = get_runs_from_db_as_dataframe_filtered(
+            self.filepath,
+            min_run_id=latest_run_id,
+            run_ids=active_run_ids,
+        )
+
+        if dbdf_delta.size == 0:
+            return
+
+        self.dbdf = pandas.concat([
+            self.dbdf.loc[~self.dbdf.index.isin(dbdf_delta.index)],
+            dbdf_delta,
+        ]).sort_index()
+        self.dbdfUpdated.emit()
+        self.dateList.sendSelectedDates()
+
+        new_ids = dbdf_delta.index.values
+        new_ids = new_ids[new_ids > latest_run_id]
+        self._showNewRuns(new_ids)
 
     @Slot(float)
     def setMonitorInterval(self, val: float) -> None:
@@ -542,6 +599,21 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
     def monitorTriggered(self) -> None:
         LOGGER.debug('Refreshing DB')
         self.refreshDB()
+
+    @Slot(str)
+    def onDBFileChanged(self, path: str) -> None:
+        if self.filepath is None:
+            return
+
+        watched = os.path.abspath(self.filepath)
+        changed = os.path.abspath(path)
+        if watched != changed:
+            return
+
+        self._watchCurrentDBFile()
+
+        # Debounce bursty DB write events to keep refresh responsive.
+        self.refreshDebounce.start(300)
 
     @Slot()
     def updateRunList(self) -> None:

@@ -243,7 +243,9 @@ class AutoPlotMainWindow(PlotWindow):
         axes = data.axes(selected)
         drs = dict()
         if len(axes) >= 2:
-            drs = {axes[-1]: 'x-axis', axes[-2]: 'y-axis'}
+            # Prefer fastest-changing axis on x and slowest-changing on y.
+            # This avoids degenerate singleton 2D views for some 3-axis runs.
+            drs = {axes[-1]: 'x-axis', axes[0]: 'y-axis'}
         if len(axes) == 1:
             drs = {axes[0]: 'x-axis'}
 
@@ -331,7 +333,8 @@ def autoplotQcodesDataset(log: bool = False,
     win = QCAutoPlotMainWindow(fc, pathAndId=pathAndId,
                                widgetOptions=widgetOptions,
                                monitor=True,
-                               loaderName='Data loader')
+                               loaderName='Data loader',
+                               plotWidgetClass=PGAutoPlot)
     win.show()
 
     return fc, win

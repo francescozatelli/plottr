@@ -4,6 +4,8 @@ qcodes_dataset.py
 Dealing with qcodes dataset (the database) data in plottr.
 """
 import os
+import sqlite3
+from datetime import datetime
 from itertools import chain
 from operator import attrgetter
 from typing import Dict, List, Set, Union, TYPE_CHECKING, Any, Tuple, Optional, cast
@@ -207,9 +209,105 @@ def get_runs_from_db_as_dataframe(path: str) -> pd.DataFrame:
     Wrapper around `get_runs_from_db` that returns the overview
     as pandas dataframe.
     """
-    overview = get_runs_from_db(path)
-    df = pd.DataFrame.from_dict(overview, orient='index')
-    return df
+    return get_runs_from_db_as_dataframe_filtered(path)
+
+
+def get_runs_from_db_as_dataframe_filtered(
+        path: str,
+        min_run_id: Optional[int] = None,
+        run_ids: Optional[Set[int]] = None,
+) -> pd.DataFrame:
+    """
+    Fetch run overview as pandas dataframe using direct sqlite queries.
+
+    This is significantly faster than loading all datasets through the qcodes
+    high-level API and supports incremental refreshes via ``min_run_id`` and
+    ``run_ids`` filters.
+    """
+    initialise_or_create_database_at(path)
+
+    run_ids = set() if run_ids is None else run_ids
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+
+        run_cols = {
+            row['name']
+            for row in conn.execute("PRAGMA table_info(runs)")
+        }
+
+        inspectr_tag_expr = "COALESCE(r.inspectr_tag, '')"
+        if 'inspectr_tag' not in run_cols:
+            inspectr_tag_expr = "''"
+
+        where_clauses: List[str] = []
+        params: List[Any] = []
+        if min_run_id is not None:
+            where_clauses.append('r.run_id > ?')
+            params.append(min_run_id)
+        if len(run_ids) > 0:
+            placeholders = ','.join('?' for _ in run_ids)
+            where_clauses.append(f'r.run_id IN ({placeholders})')
+            params.extend(sorted(run_ids))
+
+        where = ''
+        if len(where_clauses) > 0:
+            where = 'WHERE (' + ' OR '.join(where_clauses) + ')'
+
+        query = f'''
+            SELECT
+                r.run_id AS run_id,
+                COALESCE(e.name, '') AS experiment,
+                COALESCE(e.sample_name, '') AS sample,
+                COALESCE(r.name, '') AS name,
+                COALESCE(r.run_timestamp, '') AS run_timestamp,
+                COALESCE(r.completed_timestamp, '') AS completed_timestamp,
+                COALESCE(r.result_counter, 0) AS records,
+                COALESCE(r.guid, '') AS guid,
+                {inspectr_tag_expr} AS inspectr_tag
+            FROM runs AS r
+            LEFT JOIN experiments AS e ON r.exp_id = e.exp_id
+            {where}
+            ORDER BY r.run_id ASC
+        '''
+        rows = conn.execute(query, params).fetchall()
+
+    def _split_timestamp(ts: Any) -> Tuple[str, str]:
+        if ts is None:
+            return '', ''
+
+        if isinstance(ts, (int, float)):
+            if pd.isna(ts):
+                return '', ''
+            dt = datetime.fromtimestamp(float(ts))
+            return dt.strftime('%Y-%m-%d'), dt.strftime('%H:%M:%S')
+
+        ts_str = str(ts).strip()
+        if len(ts_str) >= 19:
+            return ts_str[:10], ts_str[11:19]
+        return '', ''
+
+    overview: Dict[int, DataSetInfoDict] = {}
+    for row in rows:
+        started_date, started_time = _split_timestamp(row['run_timestamp'])
+        completed_date, completed_time = _split_timestamp(row['completed_timestamp'])
+
+        run_id = int(row['run_id'])
+        overview[run_id] = DataSetInfoDict(
+            experiment=str(row['experiment']),
+            sample=str(row['sample']),
+            name=str(row['name']),
+            completed_date=completed_date,
+            completed_time=completed_time,
+            started_date=started_date,
+            started_time=started_time,
+            structure=None,
+            records=int(row['records']),
+            guid=str(row['guid']),
+            inspectr_tag=str(row['inspectr_tag']),
+        )
+
+    return pd.DataFrame.from_dict(overview, orient='index')
 
 
 # Extracting data

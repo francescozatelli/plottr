@@ -4,7 +4,7 @@ from plottr.plot.mpl.autoplot import AutoPlot as MPLAutoPlot
 
 config = {
 
-    'default-plotwidget': MPLAutoPlot,
+    'default-plotwidget': PGAutoPlot,
 
     'matplotlibrc': {
         'axes.grid': True,
@@ -38,7 +38,18 @@ config = {
                         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'],
         'line_symbols': ['o', ],
         'line_symbol_size': 7,
+        'adaptive_1d_max_points': 200000,
+        'adaptive_scatter_max_points': 80000,
+        'adaptive_color_scatter_max_points': 80000,
+        'subplot_max_columns': 4,
         'minimum_plot_size': (400, 400),
         'default_colormap': 'magma_r',
+        'colormap_options': ['magma_r', 'magma', 'viridis', 'inferno',
+                             'plasma', 'cividis', 'turbo', 'CET-L1', 'CET-L9'],
+        'fft_remove_dc': True,
+        'fft_detrend_linear': True,
+        'fft_apply_hann_window': True,
+        'fft_drop_zero_bin': True,
+        'fft_drop_low_bins': 2,
     }
 }
