@@ -243,6 +243,7 @@ class FigureMaker(BaseFM):
         max_scatter_points = getcfg('main', 'pyqtgraph', 'adaptive_scatter_max_points', default=80000)
 
         subPlot = self.subPlotFromId(plotItem.subPlot)
+        self._clearCoupledSecondaryAxes(subPlot)
 
         assert len(plotItem.data) == 2
         x, y = plotItem.data
@@ -326,6 +327,7 @@ class FigureMaker(BaseFM):
     def _colorPlot(self, plotItem: PlotItem) -> None:
         subPlot = self.subPlotFromId(plotItem.subPlot)
         assert isinstance(subPlot, PlotWithColorbar) and len(plotItem.data) == 3
+        self._clearCoupledSecondaryAxes(subPlot)
         x, y, z = plotItem.data
         x = np.asarray(x)
         y = np.asarray(y)
@@ -360,6 +362,8 @@ class FigureMaker(BaseFM):
         subPlot.setColormap(self.colormap)
         subPlot.plot.setLogMode(x=False, y=False)
         subPlot.setImage(x, y, z)
+        coupled_info = plotItem.plotOptions.get('coupledSecondaryAxis') if plotItem.plotOptions is not None else None
+        self._applyCoupledSecondaryAxis(subPlot, coupled_info)
 
     def _normalize_grid_axis_order(self, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Ensure displayed 2D grids are ordered with ascending x/y axes.
@@ -458,6 +462,7 @@ class FigureMaker(BaseFM):
     def _scatterPlot2d(self, plotItem: PlotItem) -> None:
         subPlot = self.subPlotFromId(plotItem.subPlot)
         assert isinstance(subPlot, PlotWithColorbar) and len(plotItem.data) == 3
+        self._clearCoupledSecondaryAxes(subPlot)
         assert not self.complexRepresentation == ComplexRepresentation.log_MagAndPhase
         x, y, z = plotItem.data
 
@@ -505,6 +510,72 @@ class FigureMaker(BaseFM):
         subPlot.setColormap(self.colormap)
         subPlot.plot.setLogMode(x=False, y=False)
         subPlot.setScatter2d(x, y, z)
+        coupled_info = plotItem.plotOptions.get('coupledSecondaryAxis') if plotItem.plotOptions is not None else None
+        self._applyCoupledSecondaryAxis(subPlot, coupled_info)
+
+    def _clearCoupledSecondaryAxes(self, subPlot: PlotBase) -> None:
+        subPlot.plot.showAxis('top', False)
+        subPlot.plot.showAxis('right', False)
+        try:
+            subPlot.plot.getAxis('top').setTicks([[]])
+            subPlot.plot.getAxis('right').setTicks([[]])
+        except Exception:
+            pass
+
+    def _applyCoupledSecondaryAxis(self, subPlot: PlotBase, info: Optional[object]) -> None:
+        if not info:
+            return
+
+        info_list: List[dict]
+        if isinstance(info, dict):
+            info_list = [info]
+        elif isinstance(info, list):
+            info_list = [i for i in info if isinstance(i, dict)]
+        else:
+            return
+
+        for ent in info_list:
+            self._applyOneCoupledSecondaryAxis(subPlot, ent)
+
+    def _applyOneCoupledSecondaryAxis(self, subPlot: PlotBase, info: dict) -> None:
+        if not info:
+            return
+
+        primary_vals = np.asarray(info.get('primary_values', []), dtype=float)
+        secondary_vals = np.asarray(info.get('secondary_values', []), dtype=float)
+        if primary_vals.size < 2 or secondary_vals.size < 2 or primary_vals.size != secondary_vals.size:
+            return
+
+        finite = np.isfinite(primary_vals) & np.isfinite(secondary_vals)
+        if np.count_nonzero(finite) < 2:
+            return
+
+        primary_vals = primary_vals[finite]
+        secondary_vals = secondary_vals[finite]
+        side = str(info.get('side', 'top'))
+        if side not in ['top', 'right']:
+            side = 'top'
+
+        axis = subPlot.plot.getAxis(side)
+        subPlot.plot.showAxis(side, True)
+        axis.setStyle(showValues=True)
+        axis_label = str(info.get('secondary_axis', 'coupled axis'))
+        secondary_unit = str(info.get('secondary_unit', '')).strip()
+        if secondary_unit:
+            axis_label = f"{axis_label} ({secondary_unit})"
+        axis.setLabel(axis_label)
+
+        # Reserve room for secondary tick labels so values are visible.
+        if side == 'top':
+            axis.setHeight(35)
+        else:
+            axis.setWidth(55)
+
+        n_ticks = min(7, primary_vals.size)
+        idx = np.linspace(0, primary_vals.size - 1, n_ticks, dtype=int)
+        idx = np.unique(idx)
+        ticks = [(float(primary_vals[i]), f"{float(secondary_vals[i]):.5g}") for i in idx]
+        axis.setTicks([ticks])
 
     def _safeLog10(self, vals: np.ndarray) -> np.ndarray:
         arr = np.asarray(vals)
@@ -1003,6 +1074,15 @@ class AutoPlot(PlotWidget):
         if self.data is None:
             return
 
+        coupled_info: Optional[object] = None
+        if self.data.has_meta('coupled_secondary_axis'):
+            try:
+                info = self.data.meta_val('coupled_secondary_axis')
+                if isinstance(info, dict) or isinstance(info, list):
+                    coupled_info = info
+            except Exception:
+                coupled_info = None
+
         with FigureMaker(parentWidget=self, widget=self.fmWidget,
                          **kwargs) as fm:
 
@@ -1018,10 +1098,26 @@ class AutoPlot(PlotWidget):
                 inds = self.data.axes(dep)
                 dvals = self.data.data_vals(dep)
                 pdt = determinePlotDataType(self.data.extract([dep]))
+                dep_coupled_info: Optional[object] = None
+                if isinstance(coupled_info, dict):
+                    primary_axis = coupled_info.get('primary_axis')
+                    if isinstance(primary_axis, str) and primary_axis in inds:
+                        dep_coupled_info = coupled_info
+                elif isinstance(coupled_info, list):
+                    matching = []
+                    for ent in coupled_info:
+                        if not isinstance(ent, dict):
+                            continue
+                        primary_axis = ent.get('primary_axis')
+                        if isinstance(primary_axis, str) and primary_axis in inds:
+                            matching.append(ent)
+                    if len(matching) > 0:
+                        dep_coupled_info = matching
                 plotId = fm.addData(
                     *[np.asanyarray(self.data.data_vals(n)) for n in inds] + [dvals],
                     labels=[str(self.data.label(n)) for n in inds] + [str(self.data.label(dep))],
                     plotDataType=pdt,
+                    coupledSecondaryAxis=dep_coupled_info,
                 )
 
         if self.fmWidget is None:

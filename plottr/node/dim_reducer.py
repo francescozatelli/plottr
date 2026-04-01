@@ -589,12 +589,51 @@ class XYSelectionWidget(DimensionReductionAssignmentWidget):
         super().__init__(parent)
 
         self.availableChoices[DataDictBase] += ["x-axis", "y-axis"]
+        self._secondaryCandidates: Dict[str, List[str]] = {'x': [], 'y': []}
+
+    def setSecondaryCandidates(self, xCandidates: List[str], yCandidates: List[str]) -> None:
+        self._secondaryCandidates = {
+            'x': list(xCandidates),
+            'y': list(yCandidates),
+        }
+        self._refreshRoleChoices()
+
+    def setData(self, structure: DataDictBase,
+                shapes: Dict[str, Dict[int, int]], dtype: Type[DataDictBase]) -> None:
+        super().setData(structure, shapes, dtype)
+        self._refreshRoleChoices()
+
+    def _refreshRoleChoices(self) -> None:
+        for dim, opts in self.choices.items():
+            combo = opts['roleSelectionWidget']
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+
+            entries: List[str] = ['None']
+            entries += [ReductionMethod.average.value, ReductionMethod.elementSelection.value]
+            entries += ['x-axis', 'y-axis']
+            if dim in self._secondaryCandidates.get('x', []):
+                entries += ['x-secondary']
+            if dim in self._secondaryCandidates.get('y', []):
+                entries += ['y-secondary']
+
+            for e in entries:
+                combo.addItem(e)
+
+            if current in entries:
+                combo.setCurrentText(current)
+            else:
+                combo.setCurrentText('None')
+            combo.blockSignals(False)
+
+        self.updateSizes()
 
     def setRole(self, dim: str, role: Optional[str] = None, **kw: Any) -> None:
         super().setRole(dim, role, **kw)
 
         # there can only be one x and y axis element.
-        if role in ['x-axis', 'y-axis']:
+        if role in ['x-axis', 'y-axis', 'x-secondary', 'y-secondary']:
             allRoles = self.getRoles()
             for d, r in allRoles.items():
                 if d == dim:
@@ -923,7 +962,8 @@ class XYSelectorNodeWidget(NodeWidget[XYSelectionWidget]):
 
         self.optSetters = {
             'dimensionRoles': self.setRoles,
-            'reductionValues': self.setReductionValues
+            'reductionValues': self.setReductionValues,
+            'secondaryRoleCandidates': self.setSecondaryRoleCandidates,
         }
         self.optGetters = {
             'dimensionRoles': self.getRoles,
@@ -941,7 +981,7 @@ class XYSelectorNodeWidget(NodeWidget[XYSelectionWidget]):
             role = rolesOptions['role']
             opts = rolesOptions['options']
 
-            if role in ['x-axis', 'y-axis']:
+            if role in ['x-axis', 'y-axis', 'x-secondary', 'y-secondary']:
                 roles[dimName] = role
 
             elif role in [e.value for e in ReductionMethod]:
@@ -957,7 +997,7 @@ class XYSelectorNodeWidget(NodeWidget[XYSelectionWidget]):
         self.widget.emitRoleChangeSignal = False
 
         for dimName, role in roles.items():
-            if role in ['x-axis', 'y-axis']:
+            if role in ['x-axis', 'y-axis', 'x-secondary', 'y-secondary']:
                 self.widget.setRole(dimName, role)
             elif isinstance(role, tuple):
                 method, arg, kw = role
@@ -971,6 +1011,12 @@ class XYSelectorNodeWidget(NodeWidget[XYSelectionWidget]):
                 self.widget.setRole(dimName, 'None')
 
         self.widget.emitRoleChangeSignal = True
+
+    def setSecondaryRoleCandidates(self, val: Dict[str, List[str]]) -> None:
+        assert self.widget is not None
+        xCandidates = val.get('x', []) if isinstance(val, dict) else []
+        yCandidates = val.get('y', []) if isinstance(val, dict) else []
+        self.widget.setSecondaryCandidates(xCandidates, yCandidates)
 
     def setReductionValues(self, val: Dict[str, float]) -> None:
         if self.widget is not None:
@@ -996,7 +1042,165 @@ class XYSelector(DimensionReducer):
 
     def __init__(self, name: str):
         self._xyAxes: Tuple[Optional[str], Optional[str]] = (None, None)
+        self._secondaryAxes: Tuple[Optional[str], Optional[str]] = (None, None)
+        self._secondaryRoleCandidates: Dict[str, List[str]] = {'x': [], 'y': []}
         super().__init__(name)
+
+    @property
+    def secondaryRoleCandidates(self) -> Dict[str, List[str]]:
+        return self._secondaryRoleCandidates
+
+    @secondaryRoleCandidates.setter
+    @updateOption('secondaryRoleCandidates')
+    def secondaryRoleCandidates(self, val: Dict[str, List[str]]) -> None:
+        self._secondaryRoleCandidates = {
+            'x': list(val.get('x', [])),
+            'y': list(val.get('y', [])),
+        }
+
+    def _as_meshgrid(self, data: DataDictBase) -> Optional[MeshgridDataDict]:
+        if isinstance(data, MeshgridDataDict):
+            return data
+        if isinstance(data, DataDict):
+            try:
+                return datadict_to_meshgrid(data)
+            except Exception:
+                return None
+        return None
+
+    def _secondary_mapping_for_pair(
+            self,
+            mesh: MeshgridDataDict,
+            primary_axis: str,
+            secondary_axis: str,
+            side: str,
+    ) -> Optional[Dict[str, Any]]:
+        if primary_axis not in mesh.axes() or secondary_axis not in mesh.axes():
+            return None
+        p = np.asarray(mesh.data_vals(primary_axis), dtype=float).reshape(-1)
+        s = np.asarray(mesh.data_vals(secondary_axis), dtype=float).reshape(-1)
+        if p.size < 8:
+            return None
+
+        finite = np.isfinite(p) & np.isfinite(s)
+        if np.count_nonzero(finite) < 8:
+            return None
+
+        pp = p[finite]
+        ss = s[finite]
+        p_std = float(np.std(pp))
+        s_std = float(np.std(ss))
+        if p_std == 0.0 or s_std == 0.0:
+            return None
+
+        p_round = np.round(pp, decimals=12)
+        p_unique = np.unique(p_round)
+        if p_unique.size < 4:
+            return None
+
+        sec_vals = np.empty_like(p_unique, dtype=float)
+        for i, pv in enumerate(p_unique):
+            m = p_round == pv
+            sec_vals[i] = float(np.nanmedian(ss[m]))
+
+        finite_map = np.isfinite(sec_vals)
+        if np.count_nonzero(finite_map) < 4:
+            return None
+
+        p_unique = p_unique[finite_map]
+        sec_vals = sec_vals[finite_map]
+        order = np.argsort(p_unique)
+        p_sorted = p_unique[order]
+        s_sorted = sec_vals[order]
+
+        # Coupled sweeps can be noisy/nonlinear. Require mostly monotonic
+        # mapped trend instead of near-perfect linear correlation.
+        sdiff = np.diff(s_sorted)
+        nz = sdiff[np.abs(sdiff) > 0]
+        if nz.size < 3:
+            return None
+        pos = np.count_nonzero(nz > 0)
+        neg = np.count_nonzero(nz < 0)
+        monotonic_score = max(pos, neg) / nz.size
+        if monotonic_score < 0.75:
+            return None
+
+        return {
+            'primary_axis': primary_axis,
+            'secondary_axis': secondary_axis,
+            'primary_unit': str(mesh[primary_axis].get('unit', '')),
+            'secondary_unit': str(mesh[secondary_axis].get('unit', '')),
+            'primary_values': p_sorted.tolist(),
+            'secondary_values': s_sorted.tolist(),
+            'side': side,
+        }
+
+    def _axis_size_in_mesh(self, data: DataDictBase, axis: str) -> Optional[int]:
+        if not isinstance(data, MeshgridDataDict):
+            return None
+        deps = data.dependents()
+        if len(deps) == 0:
+            return None
+        dep = deps[0]
+        axes = data[dep].get('axes', [])
+        if axis not in axes:
+            return None
+        idx = axes.index(axis)
+        vals = np.asarray(data[dep]['values'])
+        if idx < 0 or idx >= vals.ndim:
+            return None
+        return int(vals.shape[idx])
+
+    def _pick_default_secondary(self, data: DataDictBase, side: str, candidates: List[str], already_used: List[str]) -> Optional[str]:
+        if len(candidates) == 0:
+            return None
+
+        valid = [c for c in candidates if c not in already_used]
+        if len(valid) == 0:
+            return None
+
+        size1 = [c for c in valid if self._axis_size_in_mesh(data, c) == 1]
+        if len(size1) > 0:
+            return size1[0]
+
+        # Stable fallback: pick the first candidate in deterministic order.
+        return valid[0]
+
+    def _detect_secondary_role_candidates(self, data: DataDictBase) -> Dict[str, List[str]]:
+        mesh = self._as_meshgrid(data)
+        if mesh is None:
+            return {'x': [], 'y': []}
+
+        x_axis, y_axis = self._xyAxes
+        reduced_axes = [ax for ax in mesh.axes() if ax in self._reductions and self._reductions[ax] is not None]
+        x_candidates: List[str] = []
+        y_candidates: List[str] = []
+        for ax in reduced_axes:
+            if x_axis is not None:
+                if self._secondary_mapping_for_pair(mesh, x_axis, ax, 'top') is not None:
+                    x_candidates.append(ax)
+            if y_axis is not None:
+                if self._secondary_mapping_for_pair(mesh, y_axis, ax, 'right') is not None:
+                    y_candidates.append(ax)
+        return {'x': x_candidates, 'y': y_candidates}
+
+    def _build_secondary_axis_info(self, data: DataDictBase) -> Optional[List[Dict[str, Any]]]:
+        mesh = self._as_meshgrid(data)
+        if mesh is None:
+            return None
+
+        infos: List[Dict[str, Any]] = []
+        x_axis, y_axis = self._xyAxes
+        x_sec, y_sec = self._secondaryAxes
+        if x_axis is not None and x_sec is not None:
+            info = self._secondary_mapping_for_pair(mesh, x_axis, x_sec, 'top')
+            if info is not None:
+                infos.append(info)
+        if y_axis is not None and y_sec is not None:
+            info = self._secondary_mapping_for_pair(mesh, y_axis, y_sec, 'right')
+            if info is not None:
+                infos.append(info)
+        return infos or None
 
     @property
     def xyAxes(self) -> Tuple[Optional[str], Optional[str]]:
@@ -1014,8 +1218,13 @@ class XYSelector(DimensionReducer):
             dr[self.xyAxes[0]] = 'x-axis'
         if self.xyAxes[1] is not None:
             dr[self.xyAxes[1]] = 'y-axis'
+        if self._secondaryAxes[0] is not None:
+            dr[self._secondaryAxes[0]] = 'x-secondary'
+        if self._secondaryAxes[1] is not None:
+            dr[self._secondaryAxes[1]] = 'y-secondary'
         for dim, red in self.reductions.items():
-            dr[dim] = red
+            if dim not in dr:
+                dr[dim] = red
         return dr
 
     @dimensionRoles.setter
@@ -1023,14 +1232,22 @@ class XYSelector(DimensionReducer):
     def dimensionRoles(self, val: Dict[str, str]) -> None:
         x = None
         y = None
+        xsec = None
+        ysec = None
+        self._reductions = {}
         for dimName, role in val.items():
             if role == 'x-axis':
                 x = dimName
             elif role == 'y-axis':
                 y = dimName
+            elif role == 'x-secondary':
+                xsec = dimName
+            elif role == 'y-secondary':
+                ysec = dimName
             else:
                 self._reductions[dimName] = cast(Optional[ReductionType], role)
         self._xyAxes = (x, y)
+        self._secondaryAxes = (xsec, ysec)
 
     def validateOptions(self, data: DataDictBase) -> bool:
         """
@@ -1079,6 +1296,9 @@ class XYSelector(DimensionReducer):
                 self.node_logger.debug(
                     f"{n} has been selected as axis, cannot be reduced.")
                 delete.append(n)
+            if n in self._secondaryAxes:
+                # keep reduction on secondary-axis dimensions
+                continue
         for n in delete:
             del self._reductions[n]
             reductionsChanged = True
@@ -1101,6 +1321,47 @@ class XYSelector(DimensionReducer):
                     self._reductions[ax] = red
                     reductionsChanged = True
 
+        for ax in self._secondaryAxes:
+            if ax is not None and ax in self._xyAxes:
+                if ax == self._secondaryAxes[0]:
+                    self._secondaryAxes = (None, self._secondaryAxes[1])
+                else:
+                    self._secondaryAxes = (self._secondaryAxes[0], None)
+                reductionsChanged = True
+
+        candidates = self._detect_secondary_role_candidates(data)
+        if candidates != self.secondaryRoleCandidates:
+            self.secondaryRoleCandidates = candidates
+
+        xsec, ysec = self._secondaryAxes
+        if xsec is not None and xsec not in candidates.get('x', []):
+            self._secondaryAxes = (None, self._secondaryAxes[1])
+            reductionsChanged = True
+        if ysec is not None and ysec not in candidates.get('y', []):
+            self._secondaryAxes = (self._secondaryAxes[0], None)
+            reductionsChanged = True
+
+        # Default behavior for coupled sweeps: if a coupled candidate exists,
+        # auto-select one secondary axis. Prefer the candidate on an axis of
+        # length 1 in the gridded data (common for coupled sweeps).
+        xsec, ysec = self._secondaryAxes
+        used = [ax for ax in [xsec, ysec] if ax is not None]
+
+        if ysec is None and self._xyAxes[1] is not None:
+            ypick = self._pick_default_secondary(data, 'y', candidates.get('y', []), used)
+            if ypick is not None:
+                self._secondaryAxes = (self._secondaryAxes[0], ypick)
+                used.append(ypick)
+                reductionsChanged = True
+
+        xsec, ysec = self._secondaryAxes
+        used = [ax for ax in [xsec, ysec] if ax is not None]
+        if xsec is None and self._xyAxes[0] is not None:
+            xpick = self._pick_default_secondary(data, 'x', candidates.get('x', []), used)
+            if xpick is not None:
+                self._secondaryAxes = (xpick, self._secondaryAxes[1])
+                reductionsChanged = True
+
         # emit signal that we've changed things
         if reductionsChanged:
             self.optionChangeNotification.emit(
@@ -1115,6 +1376,8 @@ class XYSelector(DimensionReducer):
         if dataIn is None:
             return None
 
+        secondary_axis_info = self._build_secondary_axis_info(dataIn)
+
         data = super().process(dataIn=dataIn)
         if data is None:
             return None
@@ -1125,6 +1388,9 @@ class XYSelector(DimensionReducer):
         if self._xyAxes[0] is not None and self._xyAxes[1] is not None:
             _kw = {self._xyAxes[0]: 0, self._xyAxes[1]: 1}
             data = data.reorder_axes(None, **_kw)
+
+        if secondary_axis_info is not None:
+            data.add_meta('coupled_secondary_axis', secondary_axis_info)
 
         # it is possible that UI options have been re-generated, while the
         # options in the node have not been changed. to make sure everything

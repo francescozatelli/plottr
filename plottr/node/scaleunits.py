@@ -1,5 +1,7 @@
 from enum import Enum, unique
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
+
+import numpy as np
 
 # Use plottr's bundled implementation to avoid deprecated qcodes plotting APIs.
 from plottr.utils.find_scale_and_prefix import find_scale_and_prefix
@@ -122,13 +124,70 @@ class ScaleUnits(Node):
         assert dataIn is not None
         data = dataIn.copy()
 
+        axis_scales: Dict[str, int] = {}
+
         if self.scale_unit_option != ScaleUnitsOption.never:
-            for name, data_item in data.data_items():        
+            for name, data_item in data.data_items():
                 prefix, selected_scale = find_scale_and_prefix(
                     data_item['values'],
                     data_item["unit"]
                 )
                 data_item["unit"] = prefix + data_item["unit"]
                 data_item['values'] = data_item['values'] * 10**(-selected_scale)
+                axis_scales[name] = selected_scale
+
+            # Keep coupled secondary-axis metadata in sync with scaled axes.
+            if data.has_meta('coupled_secondary_axis'):
+                info: Any = data.meta_val('coupled_secondary_axis')
+                info_list = info if isinstance(info, list) else [info]
+                updated: list[Dict[str, Any]] = []
+
+                def _scale_vals(axis_name: Any, vals: Any, unit: str) -> tuple[np.ndarray, int, str]:
+                    arr = np.asarray(vals, dtype=float)
+                    if arr.size == 0:
+                        return arr, 0, unit
+
+                    if isinstance(axis_name, str) and axis_name in axis_scales:
+                        scale = axis_scales[axis_name]
+                        return arr * (10 ** (-scale)), scale, unit
+
+                    prefix, selected_scale = find_scale_and_prefix(arr, unit)
+                    return arr * (10 ** (-selected_scale)), selected_scale, prefix + unit
+
+                for ent in info_list:
+                    if not isinstance(ent, dict):
+                        continue
+
+                    ent2 = dict(ent)
+                    primary_axis = ent2.get('primary_axis')
+                    secondary_axis = ent2.get('secondary_axis')
+
+                    p_unit = str(ent2.get('primary_unit', ''))
+                    s_unit = str(ent2.get('secondary_unit', ''))
+
+                    p_vals, p_scale, p_unit_scaled = _scale_vals(
+                        primary_axis,
+                        ent2.get('primary_values', []),
+                        p_unit,
+                    )
+                    s_vals, s_scale, s_unit_scaled = _scale_vals(
+                        secondary_axis,
+                        ent2.get('secondary_values', []),
+                        s_unit,
+                    )
+
+                    ent2['primary_values'] = p_vals.tolist()
+                    ent2['secondary_values'] = s_vals.tolist()
+                    ent2['primary_scale'] = int(p_scale)
+                    ent2['secondary_scale'] = int(s_scale)
+                    ent2['primary_unit'] = p_unit_scaled
+                    ent2['secondary_unit'] = s_unit_scaled
+
+                    updated.append(ent2)
+
+                if isinstance(info, list):
+                    data.add_meta('coupled_secondary_axis', updated)
+                elif len(updated) > 0:
+                    data.add_meta('coupled_secondary_axis', updated[0])
 
         return dict(dataOut=data)

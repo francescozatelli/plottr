@@ -6,6 +6,7 @@ A node and widget for placing data onto a grid (or not).
 from enum import Enum, unique
 
 from typing import Tuple, Dict, Any, List, Optional, Sequence, cast
+import numpy as np
 
 from typing_extensions import TypedDict
 
@@ -357,7 +358,6 @@ class DataGridder(Node[DataGridderNodeWidget]):
     shapeDetermined = Signal(dict)
 
     axesList = Signal(list)
-
     def __init__(self, name: str):
 
         self._grid: Tuple[GridOption, Dict[str, Any]] = (GridOption.noGrid, {})
@@ -502,6 +502,7 @@ class DataGridder(Node[DataGridderNodeWidget]):
                             dout = dd.datadict_to_meshgrid(data)
                         else:
                             raise err
+
             except GriddingError:
                 dout = data.expand()
                 self.node_logger.info("data could not be gridded. Falling back "

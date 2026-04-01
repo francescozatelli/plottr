@@ -7,6 +7,7 @@ import os
 import time
 import argparse
 from typing import Union, Tuple, Optional, Type, List, Any, Type
+import numpy as np
 from packaging import version
 
 from .. import QtCore, Flowchart, Signal, Slot, QtWidgets, QtGui
@@ -37,6 +38,19 @@ __license__ = 'MIT'
 # TODO: * separate logging window
 
 LOGGER = logging.getLogger('plottr.apps.autoplot')
+
+
+def _axis_unique_count(data: DataDictBase, axis: str) -> int:
+    """Estimate axis size from unique finite coordinate values."""
+    try:
+        vals = np.asarray(data.data_vals(axis), dtype=float).reshape(-1)
+    except Exception:
+        return 0
+
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return 0
+    return int(np.unique(np.round(vals, decimals=12)).size)
 
 
 def autoplot(inputData: Union[None, DataDictBase] = None,
@@ -244,10 +258,26 @@ class AutoPlotMainWindow(PlotWindow):
         axes = data.axes(selected)
         drs = dict()
         if len(axes) >= 2:
-            # Prefer fastest-changing axis on x and slowest-changing on y.
-            # This avoids degenerate singleton 2D views for some 3-axis runs.
-            drs = {axes[-1]: 'x-axis', axes[0]: 'y-axis'}
-            for ax in axes[1:-1]:
+            # Prefer fastest-changing axis on x and a non-singleton axis on y.
+            sizes = {ax: _axis_unique_count(data, ax) for ax in axes}
+            x_ax = axes[-1]
+            y_candidates = [ax for ax in axes[:-1] if sizes.get(ax, 0) > 1]
+            y_ax = y_candidates[-1] if len(y_candidates) > 0 else axes[0]
+
+            drs = {x_ax: 'x-axis', y_ax: 'y-axis'}
+
+            # Coupled-sweep default: if one extra axis has effective size 1,
+            # use it as the default secondary axis.
+            singleton_extras = [
+                ax for ax in axes
+                if ax not in [x_ax, y_ax] and sizes.get(ax, 0) == 1
+            ]
+            if len(singleton_extras) > 0:
+                drs[singleton_extras[0]] = 'y-secondary'
+
+            for ax in axes:
+                if ax in drs:
+                    continue
                 # For 3D+ data, default extra dimensions to averaging so a
                 # meaningful plot appears immediately instead of an arbitrary
                 # first-slice that can be empty or unrepresentative.
