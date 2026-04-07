@@ -100,19 +100,12 @@ class PlotWithColorbar(PlotBase):
 
         cmap_name = config_entry('main', 'pyqtgraph', 'default_colormap')
         cmap = self._getColormap(cmap_name)
+        self._colorbarWidth = int(config_entry('main', 'pyqtgraph', 'colorbar_base_width', default=18))
 
         self.colorbar: pg.ColorBarItem = pg.ColorBarItem(interactive=True, values=(0, 1),
-                                                         colorMap=cmap, width=15)
+                                                         colorMap=cmap, width=self._colorbarWidth)
         self.graphicsLayout.addItem(self.colorbar)
-        tick_pt = int(config_entry('main', 'pyqtgraph', 'axis_font_size_pt', default=11))
-        label_pt = int(config_entry('main', 'pyqtgraph', 'axis_label_size_pt', default=12))
-        font = QtGui.QFont()
-        font.setPointSize(max(7, tick_pt))
-        self.colorbar.axis.setStyle(tickFont=font, autoExpandTextSpace=True)
-        try:
-            self.colorbar.axis.label.setAttr('size', f'{max(8, label_pt)}pt')
-        except Exception:
-            pass
+        self._applyColorbarTextStyle()
 
         self.img: Optional[pg.ImageItem] = None
         self.scatter: Optional[pg.ScatterPlotItem] = None
@@ -125,6 +118,59 @@ class PlotWithColorbar(PlotBase):
         self.imageXGrid: Optional[np.ndarray] = None
         self.imageYGrid: Optional[np.ndarray] = None
         self.imageRect: Optional[QtCore.QRectF] = None
+
+    def _applyColorbarTextStyle(self) -> None:
+        tick_pt = int(config_entry('main', 'pyqtgraph', 'axis_font_size_pt', default=11))
+        label_pt = int(config_entry('main', 'pyqtgraph', 'axis_label_size_pt', default=12))
+        font = QtGui.QFont()
+        font.setPointSize(max(7, tick_pt))
+        self.colorbar.axis.setStyle(tickFont=font, autoExpandTextSpace=True)
+        try:
+            self.colorbar.axis.label.setAttr('size', f'{max(8, label_pt)}pt')
+        except Exception:
+            pass
+
+    def setColorbarWidth(self, width: int) -> None:
+        width = max(4, int(width))
+        if width == self._colorbarWidth:
+            return
+
+        self._colorbarWidth = width
+
+        levels = (0.0, 1.0)
+        cmap = self._getColormap(config_entry('main', 'pyqtgraph', 'default_colormap'))
+        try:
+            levels = tuple(self.colorbar.levels())
+        except Exception:
+            pass
+        try:
+            if hasattr(self.colorbar, 'colorMap'):
+                cmap = self.colorbar.colorMap()
+            elif hasattr(self.colorbar, 'cmap'):
+                cmap = self.colorbar.cmap
+        except Exception:
+            pass
+
+        try:
+            self.graphicsLayout.removeItem(self.colorbar)
+        except Exception:
+            pass
+
+        self.colorbar = pg.ColorBarItem(interactive=True, values=levels,
+                                        colorMap=cmap, width=width)
+        self.graphicsLayout.addItem(self.colorbar)
+        self._applyColorbarTextStyle()
+
+        # Re-link data source and scatter callbacks on the new colorbar.
+        try:
+            self.colorbar.setLevels(levels)
+            if self.img is not None:
+                self.colorbar.setImageItem(self.img)
+            if self.scatter is not None:
+                self.colorbar.sigLevelsChanged.connect(self._colorScatterPoints)
+                self._colorScatterPoints(self.colorbar)
+        except Exception:
+            pass
 
     def _getColormap(self, name: str) -> pg.ColorMap:
         # Prefer pyqtgraph-native maps, then matplotlib (for names like magma_r),

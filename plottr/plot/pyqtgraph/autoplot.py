@@ -157,6 +157,25 @@ class FigureWidget(QtWidgets.QWidget):
         col = idx % max_cols
         self.gridLayout.addWidget(plot, row, col)
         self.subPlots.append(plot)
+        self._updateColorbarWidths()
+
+    def _updateColorbarWidths(self) -> None:
+        nplots = max(1, len(self.subPlots))
+        base_w = int(getcfg('main', 'pyqtgraph', 'colorbar_base_width', default=18))
+        min_w = int(getcfg('main', 'pyqtgraph', 'colorbar_min_width', default=6))
+        shrink_per_plot = int(getcfg('main', 'pyqtgraph', 'colorbar_shrink_per_plot', default=2))
+        shrink_every_n = int(getcfg('main', 'pyqtgraph', 'colorbar_shrink_every_n_plots', default=1))
+        shrink_per_plot = max(0, shrink_per_plot)
+        shrink_every_n = max(1, shrink_every_n)
+        shrink_steps = (nplots - 1) // shrink_every_n
+        width = max(min_w, base_w - shrink_per_plot * shrink_steps)
+
+        for p in self.subPlots:
+            if isinstance(p, PlotWithColorbar):
+                try:
+                    p.setColorbarWidth(width)
+                except Exception:
+                    pass
 
     def clearAllPlots(self) -> None:
         """Clear all plot contents."""
