@@ -11,6 +11,8 @@ object for plotting data automatically using ``pyqtgraph``.
 import logging
 from pathlib import Path
 import time
+import re
+import html
 from dataclasses import dataclass
 from typing import List, Optional, Any
 
@@ -28,6 +30,79 @@ from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
 logger = logging.getLogger(__name__)
 
 TIMESTRFORMAT = "%Y-%m-%dT%H%M%S"
+
+_LATEX_SYMBOLS = {
+    r"\\alpha": "alpha",
+    r"\\beta": "beta",
+    r"\\gamma": "gamma",
+    r"\\delta": "delta",
+    r"\\epsilon": "epsilon",
+    r"\\varepsilon": "varepsilon",
+    r"\\zeta": "zeta",
+    r"\\eta": "eta",
+    r"\\theta": "theta",
+    r"\\vartheta": "vartheta",
+    r"\\iota": "iota",
+    r"\\kappa": "kappa",
+    r"\\lambda": "lambda",
+    r"\\mu": "mu",
+    r"\\nu": "nu",
+    r"\\xi": "xi",
+    r"\\pi": "pi",
+    r"\\rho": "rho",
+    r"\\sigma": "sigma",
+    r"\\tau": "tau",
+    r"\\upsilon": "upsilon",
+    r"\\phi": "phi",
+    r"\\varphi": "varphi",
+    r"\\chi": "chi",
+    r"\\psi": "psi",
+    r"\\omega": "omega",
+    r"\\Gamma": "Gamma",
+    r"\\Delta": "Delta",
+    r"\\Theta": "Theta",
+    r"\\Lambda": "Lambda",
+    r"\\Xi": "Xi",
+    r"\\Pi": "Pi",
+    r"\\Sigma": "Sigma",
+    r"\\Upsilon": "Upsilon",
+    r"\\Phi": "Phi",
+    r"\\Psi": "Psi",
+    r"\\Omega": "Omega",
+    r"\\times": "times",
+    r"\\cdot": "middot",
+    r"\\pm": "plusmn",
+    r"\\leq": "le",
+    r"\\geq": "ge",
+}
+
+
+def _latex_math_to_html(math_text: str) -> str:
+    t = math_text
+    t = re.sub(r"\\\\mathrm\{([^{}]*)\}", r"\1", t)
+    t = re.sub(r"\\\\text\{([^{}]*)\}", r"\1", t)
+    for token, ent in _LATEX_SYMBOLS.items():
+        t = t.replace(token, f"&{ent};")
+    t = t.replace("\\\\", "")
+    t = re.sub(r"\^\{([^{}]+)\}", r"<sup>\1</sup>", t)
+    t = re.sub(r"_\{([^{}]+)\}", r"<sub>\1</sub>", t)
+    t = re.sub(r"\^([A-Za-z0-9+\-])", r"<sup>\1</sup>", t)
+    t = re.sub(r"_([A-Za-z0-9+\-])", r"<sub>\1</sub>", t)
+    return t
+
+
+def _render_inline_latex(text: str) -> str:
+    if "$" not in text:
+        return text
+
+    parts = re.split(r"(\$[^$]+\$)", text)
+    out: List[str] = []
+    for part in parts:
+        if part.startswith("$") and part.endswith("$") and len(part) > 2:
+            out.append(_latex_math_to_html(part[1:-1]))
+        else:
+            out.append(html.escape(part))
+    return "".join(out)
 
 
 class FigureWidget(QtWidgets.QWidget):
@@ -48,6 +123,10 @@ class FigureWidget(QtWidgets.QWidget):
 
         self.title = QtWidgets.QLabel(parent=self)
         self.title.setAlignment(QtCore.Qt.AlignHCenter)
+        title_font_pt = int(getcfg('main', 'pyqtgraph', 'title_font_size_pt', default=14))
+        tfont = self.title.font()
+        tfont.setPointSize(max(9, title_font_pt))
+        self.title.setFont(tfont)
 
         self.gridContainer = QtWidgets.QWidget(parent=self)
         self.gridContainer.setSizePolicy(QtWidgets.QSizePolicy.Expanding,
@@ -92,7 +171,7 @@ class FigureWidget(QtWidgets.QWidget):
         self.subPlots = []
 
     def setTitle(self, title: str = '') -> None:
-        self.title.setText(title)
+        self.title.setText(_render_inline_latex(title))
         if len(title.strip()) == 0:
             self.title.setVisible(False)
         else:
@@ -138,10 +217,37 @@ class FigureMaker(BaseFM):
         self.logY = False
         self.logColor = False
         self.fftAxis = 'none'
+        self.symmetricColor = False
+        self.symmetricColorCenter = 0.0
 
     # re-implementing to get correct type annotation.
     def __enter__(self) -> "FigureMaker":
         return self
+
+    def _axisLabelStyle(self) -> dict:
+        label_pt = int(getcfg('main', 'pyqtgraph', 'axis_label_size_pt', default=18))
+        return {'font-size': f'{max(10, label_pt)}pt'}
+
+    def _colorbarLabelStyle(self) -> dict:
+        label_pt = int(getcfg('main', 'pyqtgraph', 'axis_label_size_pt', default=18))
+        return {'font-size': f'{max(9, label_pt - 2)}pt'}
+
+    def _setPlotLabel(self, plot: Any, side: str, text: str) -> None:
+        style = self._axisLabelStyle()
+        plot.setLabel(side, _render_inline_latex(text), **style)
+        try:
+            axis = plot.getAxis(side)
+            axis.label.setAttr('size', style['font-size'])
+        except Exception:
+            pass
+
+    def _setColorbarLabel(self, colorbar: Any, side: str, text: str) -> None:
+        style = self._colorbarLabelStyle()
+        colorbar.setLabel(side, _render_inline_latex(text), **style)
+        try:
+            colorbar.axis.label.setAttr('size', style['font-size'])
+        except Exception:
+            pass
 
     def subPlotFromId(self, subPlotId: int) -> PlotBase:
         """Get SubPlot from ID."""
@@ -182,33 +288,40 @@ class FigureMaker(BaseFM):
         # label the x axis if there's only one x label
         if isinstance(subPlot, Plot):
             if len(set(labels[0])) == 1:
-                subPlot.plot.setLabel("bottom", labels[0][0])
+                self._setPlotLabel(subPlot.plot, "bottom", labels[0][0])
+
+            # For single-trace 1D panels, place dependent quantity on the y-axis.
+            # In combined 1D mode we rely on legend entries instead.
+            if (not self.combineTraces) and len(labels) > 1 and len(set(labels[1])) == 1:
+                self._setPlotLabel(subPlot.plot, "left", labels[1][0])
+            else:
+                self._setPlotLabel(subPlot.plot, "left", "")
 
         if isinstance(subPlot, PlotWithColorbar):
             subPlot.setColormap(self.colormap)
             if len(set(labels[0])) == 1:
-                subPlot.plot.setLabel("bottom", labels[0][0])
+                self._setPlotLabel(subPlot.plot, "bottom", labels[0][0])
 
             if len(set(labels[1])) == 1:
-                subPlot.plot.setLabel('left', labels[1][0])
+                self._setPlotLabel(subPlot.plot, 'left', labels[1][0])
 
             if len(set(labels[2])) == 1:
-                subPlot.colorbar.setLabel('left', labels[2][0])
+                self._setColorbarLabel(subPlot.colorbar, 'left', labels[2][0])
 
         # Apply FFT labels last so they are not overwritten by default labels.
         if self.fftAxis in ['x', 'y']:
             if isinstance(subPlot, PlotWithColorbar):
                 if self.fftAxis == 'x' and len(set(labels[0])) == 1:
-                    subPlot.plot.setLabel('bottom', f'FFT freq({labels[0][0]})')
+                    self._setPlotLabel(subPlot.plot, 'bottom', f'FFT freq({labels[0][0]})')
                 if self.fftAxis == 'y' and len(set(labels[1])) == 1:
-                    subPlot.plot.setLabel('left', f'FFT freq({labels[1][0]})')
+                    self._setPlotLabel(subPlot.plot, 'left', f'FFT freq({labels[1][0]})')
                 if len(set(labels[2])) == 1:
-                    subPlot.colorbar.setLabel('left', f'|FFT({labels[2][0]})|')
+                    self._setColorbarLabel(subPlot.colorbar, 'left', f'|FFT({labels[2][0]})|')
             elif isinstance(subPlot, Plot):
                 if len(set(labels[0])) == 1:
-                    subPlot.plot.setLabel('bottom', f'FFT freq({labels[0][0]})')
-                if len(set(labels[1])) == 1:
-                    subPlot.plot.setLabel('left', f'|FFT({labels[1][0]})|')
+                    self._setPlotLabel(subPlot.plot, 'bottom', f'FFT freq({labels[0][0]})')
+                if (not self.combineTraces) and len(labels) > 1 and len(set(labels[1])) == 1:
+                    self._setPlotLabel(subPlot.plot, 'left', f'|FFT({labels[1][0]})|')
 
     def plot(self, plotItem: PlotItem) -> None:
         """Plot the given item."""
@@ -251,10 +364,9 @@ class FigureMaker(BaseFM):
 
         color = colors[self.findPlotIndexInSubPlot(plotItem.id) % len(colors)]
         symbol = symbols[self.findPlotIndexInSubPlot(plotItem.id) % len(symbols)]
-        if isinstance(plotItem.labels, list):
-             name = plotItem.labels[-1]
-        else:
-            name = ''
+        name = None
+        if self.combineTraces and isinstance(plotItem.labels, list):
+            name = plotItem.labels[-1] or None
 
         # flatten and apply data transformations (if applicable)
         x = x.flatten()
@@ -267,8 +379,8 @@ class FigureMaker(BaseFM):
             x, y = self._fft1d(x, y)
             x_label = subPlot.plot.getAxis('bottom').labelText or 'x'
             y_label = subPlot.plot.getAxis('left').labelText or 'y'
-            subPlot.plot.setLabel('bottom', f'FFT freq({x_label})')
-            subPlot.plot.setLabel('left', f'|FFT({y_label})|')
+            self._setPlotLabel(subPlot.plot, 'bottom', f'FFT freq({x_label})')
+            self._setPlotLabel(subPlot.plot, 'left', f'|FFT({y_label})|')
 
         if self.logX:
             mask = x > 0
@@ -339,14 +451,14 @@ class FigureMaker(BaseFM):
             x, z = self._fft2d_axis_x(x, z)
             x_label = subPlot.plot.getAxis('bottom').labelText or 'x'
             z_label = subPlot.colorbar.axis.labelText or 'z'
-            subPlot.plot.setLabel('bottom', f'FFT freq({x_label})')
-            subPlot.colorbar.setLabel('left', f'|FFT({z_label})|')
+            self._setPlotLabel(subPlot.plot, 'bottom', f'FFT freq({x_label})')
+            self._setColorbarLabel(subPlot.colorbar, 'left', f'|FFT({z_label})|')
         elif self.fftAxis == 'y':
             y, z = self._fft2d_axis_y(y, z)
             y_label = subPlot.plot.getAxis('left').labelText or 'y'
             z_label = subPlot.colorbar.axis.labelText or 'z'
-            subPlot.plot.setLabel('left', f'FFT freq({y_label})')
-            subPlot.colorbar.setLabel('left', f'|FFT({z_label})|')
+            self._setPlotLabel(subPlot.plot, 'left', f'FFT freq({y_label})')
+            self._setColorbarLabel(subPlot.colorbar, 'left', f'|FFT({z_label})|')
 
         if self.logColor:
             z = self._safeLog10(z)
@@ -359,9 +471,12 @@ class FigureMaker(BaseFM):
         if z.size == 0:
             return
 
+        x, y, z = self._downsample_grid2d_if_needed(x, y, z)
+
         subPlot.setColormap(self.colormap)
         subPlot.plot.setLogMode(x=False, y=False)
         subPlot.setImage(x, y, z)
+        self._applyColorLevels(subPlot, z)
         coupled_info = plotItem.plotOptions.get('coupledSecondaryAxis') if plotItem.plotOptions is not None else None
         self._applyCoupledSecondaryAxis(subPlot, coupled_info)
 
@@ -481,11 +596,11 @@ class FigureMaker(BaseFM):
             z_label = subPlot.colorbar.axis.labelText or 'z'
             if self.fftAxis == 'x':
                 x_label = subPlot.plot.getAxis('bottom').labelText or 'x'
-                subPlot.plot.setLabel('bottom', f'FFT freq({x_label})')
+                self._setPlotLabel(subPlot.plot, 'bottom', f'FFT freq({x_label})')
             else:
                 y_label = subPlot.plot.getAxis('left').labelText or 'y'
-                subPlot.plot.setLabel('left', f'FFT freq({y_label})')
-            subPlot.colorbar.setLabel('left', f'|FFT({z_label})|')
+                self._setPlotLabel(subPlot.plot, 'left', f'FFT freq({y_label})')
+            self._setColorbarLabel(subPlot.colorbar, 'left', f'|FFT({z_label})|')
 
         finite_mask = np.isfinite(x) & np.isfinite(y)
         if self.logX:
@@ -510,8 +625,61 @@ class FigureMaker(BaseFM):
         subPlot.setColormap(self.colormap)
         subPlot.plot.setLogMode(x=False, y=False)
         subPlot.setScatter2d(x, y, z)
+        self._applyColorLevels(subPlot, z)
         coupled_info = plotItem.plotOptions.get('coupledSecondaryAxis') if plotItem.plotOptions is not None else None
         self._applyCoupledSecondaryAxis(subPlot, coupled_info)
+
+    def _downsample_grid2d_if_needed(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        z: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Downsample very large 2D grids before plotting to limit memory pressure."""
+        if z.ndim != 2:
+            return x, y, z
+
+        max_cells = int(getcfg('main', 'pyqtgraph', 'adaptive_grid_max_cells', default=800000))
+        if max_cells <= 0 or z.size <= max_cells:
+            return x, y, z
+
+        stride = int(np.ceil(np.sqrt(z.size / max_cells)))
+        stride = max(1, stride)
+
+        z_ds = z[::stride, ::stride]
+
+        if x.ndim == 2:
+            x_ds = x[::stride, ::stride]
+        else:
+            x_ds = x[::stride]
+
+        if y.ndim == 2:
+            y_ds = y[::stride, ::stride]
+        else:
+            y_ds = y[::stride]
+
+        return x_ds, y_ds, z_ds
+
+    def _applyColorLevels(self, subPlot: PlotWithColorbar, z: np.ndarray) -> None:
+        z_arr = np.asarray(z, dtype=float)
+        finite = z_arr[np.isfinite(z_arr)]
+        if finite.size == 0:
+            return
+
+        if self.symmetricColor:
+            center = float(self.symmetricColorCenter)
+            dev = float(np.nanmax(np.abs(finite - center)))
+            if not np.isfinite(dev) or dev <= 0:
+                dev = 1.0
+            levels = (center - dev, center + dev)
+        else:
+            z_min = float(np.nanmin(finite))
+            z_max = float(np.nanmax(finite))
+            if not np.isfinite(z_min) or not np.isfinite(z_max) or z_min == z_max:
+                z_min, z_max = 0.0, 1.0
+            levels = (z_min, z_max)
+
+        subPlot.colorbar.setLevels(levels)
 
     def _clearCoupledSecondaryAxes(self, subPlot: PlotBase) -> None:
         subPlot.plot.showAxis('top', False)
@@ -563,7 +731,7 @@ class FigureMaker(BaseFM):
         secondary_unit = str(info.get('secondary_unit', '')).strip()
         if secondary_unit:
             axis_label = f"{axis_label} ({secondary_unit})"
-        axis.setLabel(axis_label)
+        axis.setLabel(axis_label, **self._axisLabelStyle())
 
         # Reserve room for secondary tick labels so values are visible.
         if side == 'top':
@@ -1093,6 +1261,8 @@ class AutoPlot(PlotWidget):
             fm.logY = self.figOptions.logY
             fm.logColor = self.figOptions.logColor
             fm.fftAxis = self.figOptions.fftAxis
+            fm.symmetricColor = self.figOptions.symmetricColor
+            fm.symmetricColorCenter = self.figOptions.symmetricColorCenter
 
             for dep in self.data.dependents():
                 inds = self.data.axes(dep)
@@ -1263,6 +1433,12 @@ class FigureOptions:
     #: FFT axis transform: 'none', 'x', or 'y'
     fftAxis: str = 'none'
 
+    #: use symmetric color limits around a chosen center value
+    symmetricColor: bool = False
+
+    #: center value used when symmetricColor is enabled
+    symmetricColorCenter: float = 0.0
+
 
 class FigureConfigToolBar(QtWidgets.QToolBar):
     """Simple toolbar to configure the figure."""
@@ -1334,6 +1510,26 @@ class FigureConfigToolBar(QtWidgets.QToolBar):
         self.logColorAction.triggered.connect(
             lambda: self._setOption('logColor', self.logColorAction.isChecked())
         )
+
+        self.symmetricColorAction = self.addAction('Sym Color')
+        self.symmetricColorAction.setCheckable(True)
+        self.symmetricColorAction.setChecked(self.options.symmetricColor)
+        self.symmetricColorAction.setToolTip('Use symmetric color limits around center value')
+        self.symmetricColorAction.triggered.connect(
+            lambda: self._setOption('symmetricColor', self.symmetricColorAction.isChecked())
+        )
+
+        self.symmetricCenterSpin = QtWidgets.QDoubleSpinBox(parent=self)
+        self.symmetricCenterSpin.setDecimals(6)
+        self.symmetricCenterSpin.setRange(-1e12, 1e12)
+        self.symmetricCenterSpin.setSingleStep(0.1)
+        self.symmetricCenterSpin.setValue(float(self.options.symmetricColorCenter))
+        self.symmetricCenterSpin.setPrefix('c=')
+        self.symmetricCenterSpin.setToolTip('Center value for symmetric color scaling')
+        self.symmetricCenterSpin.valueChanged.connect(
+            lambda val: self._setOption('symmetricColorCenter', float(val))
+        )
+        self.addWidget(self.symmetricCenterSpin)
 
         fftOptions = QtWidgets.QMenu(parent=self)
         fftGroup = QtWidgets.QActionGroup(fftOptions)

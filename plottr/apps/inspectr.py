@@ -24,7 +24,12 @@ from typing_extensions import TypedDict
 from numpy import rint
 import pandas
 
-from plottr import QtCore, QtWidgets, Signal, Slot, QtGui, Flowchart
+try:
+    import psutil
+except Exception:  # pragma: no cover - optional dependency
+    psutil = None
+
+from plottr import QtCore, QtWidgets, Signal, Slot, QtGui, Flowchart, config_entry
 
 from .. import log as plottrlog
 from ..data.qcodes_dataset import (get_runs_from_db_as_dataframe,
@@ -323,6 +328,9 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self.dbWatcher = QtCore.QFileSystemWatcher(self)
         self.refreshDebounce = QtCore.QTimer(self)
         self.refreshDebounce.setSingleShot(True)
+        self._userMonitorIntervalSec: float = 0.0
+        self._effectiveMonitorIntervalSec: float = 0.0
+        self._lastEmbeddedRedrawTs: float = 0.0
 
         # flag for determining what has been loaded so far.
         # * None: nothing opened yet.
@@ -488,7 +496,66 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         tstamp = time.strftime("%Y-%m-%d %H:%M:%S")
         assert self.filepath is not None
         path = os.path.abspath(self.filepath)
-        self.status.showMessage(f"{path} (loaded: {tstamp})")
+        extras = self._statusExtras()
+        suffix = f" | {extras}" if extras else ""
+        self.status.showMessage(f"{path} (loaded: {tstamp}){suffix}")
+
+    def _statusExtras(self) -> str:
+        extras: List[str] = []
+        if psutil is not None:
+            try:
+                rss_mb = psutil.Process(os.getpid()).memory_info().rss / (1024.0 * 1024.0)
+                extras.append(f"RSS {rss_mb:.0f} MB")
+            except Exception:
+                pass
+
+        if self._embeddedPlotWindow is not None and self._embeddedPlotWindow.loaderNode is not None:
+            try:
+                data = self._embeddedPlotWindow.loaderNode.outputValues().get('dataOut')
+                if data is not None:
+                    mode = data.meta_val('plottr_memory_guard_mode')
+                    stride = data.meta_val('plottr_decimation_stride')
+                    if mode not in [None, '', 'off', 'normal']:
+                        extras.append(f"guard:{mode}")
+                    if stride is not None and int(stride) > 1:
+                        extras.append(f"decim x{int(stride)}")
+            except Exception:
+                pass
+
+        if self._effectiveMonitorIntervalSec > 0:
+            extras.append(f"refresh {self._effectiveMonitorIntervalSec:.1f}s")
+
+        return " | ".join(extras)
+
+    def _currentGuardMode(self) -> str:
+        if self._embeddedPlotWindow is None or self._embeddedPlotWindow.loaderNode is None:
+            return 'normal'
+
+        try:
+            data = self._embeddedPlotWindow.loaderNode.outputValues().get('dataOut')
+            if data is None:
+                return 'normal'
+            mode = str(data.meta_val('plottr_memory_guard_mode') or 'normal').strip().lower()
+            if mode in ['', 'off']:
+                return 'normal'
+            return mode
+        except Exception:
+            return 'normal'
+
+    def _applyEffectiveMonitorInterval(self) -> None:
+        base = float(max(0.0, self._userMonitorIntervalSec))
+        mode = self._currentGuardMode()
+        factor = float(config_entry('main', 'qcodes', 'refresh_slowdown_factor_emergency', default=3.0))
+
+        effective = base
+        if base > 0 and mode == 'emergency' and factor > 1.0:
+            effective = base * factor
+
+        self._effectiveMonitorIntervalSec = effective
+
+        self.monitor.stop()
+        if effective > 0:
+            self.monitor.start(int(effective * 1000))
 
     ### loading the DB and populating the widgets
     @Slot()
@@ -616,6 +683,8 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             # plotted run may have new data points appended. Refresh the
             # embedded plot in place so live plotting stays reactive.
             self._refreshEmbeddedPlot()
+            self._applyEffectiveMonitorInterval()
+            self.showDBPath()
             return
 
         self.dbdf = pandas.concat([
@@ -632,19 +701,24 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         # Keep the currently plotted run live-updated without requiring
         # reselection from the run list.
         self._refreshEmbeddedPlot(updated_ids=set(int(i) for i in dbdf_delta.index.values))
+        self._applyEffectiveMonitorInterval()
+        self.showDBPath()
 
     @Slot(float)
     def setMonitorInterval(self, val: float) -> None:
-        self.monitor.stop()
-        if val > 0:
-            self.monitor.start(int(val * 1000))
+        self._userMonitorIntervalSec = float(max(0.0, val))
+        self._applyEffectiveMonitorInterval()
 
-        self.monitorInput.spin.setValue(val)
+        if abs(float(self.monitorInput.spin.value()) - float(val)) > 1e-9:
+            self.monitorInput.spin.blockSignals(True)
+            self.monitorInput.spin.setValue(val)
+            self.monitorInput.spin.blockSignals(False)
 
     @Slot()
     def monitorTriggered(self) -> None:
         LOGGER.debug('Refreshing DB')
         self.refreshDB()
+        self._applyEffectiveMonitorInterval()
 
     @Slot(str)
     def onDBFileChanged(self, path: str) -> None:
@@ -759,6 +833,14 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if updated_ids is not None and self._plottedRunId not in updated_ids:
             return
 
+        max_fps = float(config_entry('main', 'qcodes', 'plot_refresh_max_fps', default=8.0))
+        if max_fps > 0:
+            now = time.monotonic()
+            min_dt = 1.0 / max_fps
+            if (now - self._lastEmbeddedRedrawTs) < min_dt:
+                return
+            self._lastEmbeddedRedrawTs = now
+
         win = self._embeddedPlotWindow
         if win.loaderNode is None:
             return
@@ -766,6 +848,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         # Do not reset defaults or selected variables; just pull newly appended
         # records for the currently visible run.
         win.refreshData()
+        self.showDBPath()
 
     @Slot(int)
     def plotRun(self, runId: int) -> None:
@@ -817,6 +900,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         win.showTime()
 
         self._plottedRunId = runId
+        self.showDBPath()
 
     def setTag(self, item: QtWidgets.QTreeWidgetItem, tag: str) -> None:
         # set tag in the database

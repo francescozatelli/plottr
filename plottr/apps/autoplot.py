@@ -10,7 +10,7 @@ from typing import Union, Tuple, Optional, Type, List, Any, Type
 import numpy as np
 from packaging import version
 
-from .. import QtCore, Flowchart, Signal, Slot, QtWidgets, QtGui
+from .. import QtCore, Flowchart, Signal, Slot, QtWidgets, QtGui, config_entry
 from .. import log as plottrlog
 from ..data.datadict import DataDictBase
 from ..data.datadict_storage import DDH5Loader
@@ -180,6 +180,8 @@ class AutoPlotMainWindow(PlotWindow):
             self.fileMenu.addAction(refreshAction)
 
         # add monitor if needed
+        self._userMonitorIntervalSec: float = 0.0
+        self._effectiveMonitorIntervalSec: float = 0.0
         if monitor:
             self.monitorToolBar: Optional[UpdateToolBar] = UpdateToolBar('Monitor data')
             self.addToolBar(self.monitorToolBar)
@@ -194,8 +196,36 @@ class AutoPlotMainWindow(PlotWindow):
             self.loaderNode.dataFieldsChanged.connect(self.onChangedLoaderData)
 
     def setMonitorInterval(self, val: float) -> None:
-        if self.monitorToolBar is not None:
-            self.monitorToolBar.setMonitorInterval(val)
+        self._userMonitorIntervalSec = float(max(0.0, val))
+        self._applyEffectiveMonitorInterval()
+
+    def _currentGuardMode(self) -> str:
+        if self.loaderNode is None:
+            return 'normal'
+        try:
+            data = self.loaderNode.outputValues().get('dataOut')
+            if data is None:
+                return 'normal'
+            mode = str(data.meta_val('plottr_memory_guard_mode') or 'normal').strip().lower()
+            if mode in ['', 'off']:
+                return 'normal'
+            return mode
+        except Exception:
+            return 'normal'
+
+    def _applyEffectiveMonitorInterval(self) -> None:
+        if self.monitorToolBar is None:
+            return
+        base = float(max(0.0, self._userMonitorIntervalSec))
+        mode = self._currentGuardMode()
+        factor = float(config_entry('main', 'qcodes', 'refresh_slowdown_factor_emergency', default=3.0))
+
+        effective = base
+        if base > 0 and mode == 'emergency' and factor > 1.0:
+            effective = base * factor
+
+        self._effectiveMonitorIntervalSec = effective
+        self.monitorToolBar.setMonitorInterval(effective)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         """
@@ -211,7 +241,23 @@ class AutoPlotMainWindow(PlotWindow):
         Displays current time and DS info in the status bar.
         """
         tstamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.status.showMessage(f"loaded: {tstamp}")
+        extras = []
+        if self.loaderNode is not None:
+            try:
+                data = self.loaderNode.outputValues().get('dataOut')
+                if data is not None:
+                    mode = data.meta_val('plottr_memory_guard_mode')
+                    stride = data.meta_val('plottr_decimation_stride')
+                    if mode not in [None, '', 'off', 'normal']:
+                        extras.append(f"guard:{mode}")
+                    if stride is not None and int(stride) > 1:
+                        extras.append(f"decim x{int(stride)}")
+            except Exception:
+                pass
+        if self._effectiveMonitorIntervalSec > 0:
+            extras.append(f"refresh {self._effectiveMonitorIntervalSec:.1f}s")
+        suffix = f" | {' | '.join(extras)}" if len(extras) > 0 else ""
+        self.status.showMessage(f"loaded: {tstamp}{suffix}")
 
     @Slot()
     def onChangedLoaderData(self) -> None:
@@ -229,6 +275,7 @@ class AutoPlotMainWindow(PlotWindow):
 
             self.loaderNode.update()
             self.showTime()
+            self._applyEffectiveMonitorInterval()
 
             if not self._initialized and self.loaderNode.nLoadedRecords > 0:
                 self.onChangedLoaderData()

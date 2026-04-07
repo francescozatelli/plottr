@@ -13,10 +13,18 @@ from typing import Dict, List, Set, Union, TYPE_CHECKING, Any, Tuple, Optional, 
 from typing_extensions import TypedDict
 
 import pandas as pd
+import numpy as np
+
+try:
+    import psutil
+except Exception:  # pragma: no cover - optional dependency
+    psutil = None
 
 from qcodes.dataset.data_set import load_by_id
 from qcodes.dataset.experiment_container import experiments
 from qcodes.dataset.sqlite.database import initialise_or_create_database_at
+
+from plottr import config_entry
 
 from .datadict import DataDictBase, DataDict, combine_datadicts
 from ..node.node import Node, updateOption
@@ -363,6 +371,69 @@ class QCodesDSLoader(Node):
 
         super().__init__(*arg, **kw)
 
+    def _rss_mb(self) -> Optional[float]:
+        if psutil is None:
+            return None
+        try:
+            p = psutil.Process(os.getpid())
+            return float(p.memory_info().rss) / (1024.0 * 1024.0)
+        except Exception:
+            return None
+
+    def _effective_display_limit(self, base_limit: int) -> Tuple[int, str, Optional[float]]:
+        """Adjust display limit based on current process RSS.
+
+        Returns: (effective_limit, guard_mode, rss_mb)
+        """
+        rss_mb = self._rss_mb()
+        if rss_mb is None:
+            return base_limit, 'off', None
+
+        warn_mb = float(config_entry('main', 'qcodes', 'memory_warning_mb', default=1500.0))
+        emergency_mb = float(config_entry('main', 'qcodes', 'memory_emergency_mb', default=2500.0))
+        warn_limit = int(config_entry('main', 'qcodes', 'max_records_for_display_warning', default=250000))
+        emergency_limit = int(config_entry('main', 'qcodes', 'max_records_for_display_emergency', default=100000))
+
+        if emergency_mb > 0 and rss_mb >= emergency_mb:
+            return min(base_limit, max(1000, emergency_limit)), 'emergency', rss_mb
+        if warn_mb > 0 and rss_mb >= warn_mb:
+            return min(base_limit, max(1000, warn_limit)), 'warning', rss_mb
+        return base_limit, 'normal', rss_mb
+
+    def _decimate_for_display(self, data: DataDictBase) -> None:
+        """Decimate records in-place to cap memory/plotting cost for very large runs."""
+        base_limit = int(config_entry('main', 'qcodes', 'max_records_for_display', default=500000))
+        max_records, guard_mode, rss_mb = self._effective_display_limit(base_limit)
+        data.add_meta('plottr_memory_guard_mode', guard_mode)
+        if rss_mb is not None:
+            data.add_meta('plottr_rss_mb', float(rss_mb))
+        if max_records <= 0:
+            return
+
+        nrecs: Optional[int] = None
+        for _name, field in data.data_items():
+            vals = np.asarray(field.get('values', []))
+            if vals.ndim != 1:
+                # Preserve shaped datasets to avoid changing semantics of
+                # metadata-shape and grid-based workflows.
+                return
+            nrecs = int(vals.shape[0])
+            break
+
+        if nrecs is None or nrecs <= max_records:
+            return
+
+        stride = int(np.ceil(nrecs / max_records))
+        stride = max(1, stride)
+        for _name, field in data.data_items():
+            vals = np.asarray(field.get('values', []))
+            if vals.shape[0] == nrecs:
+                field['values'] = vals[::stride]
+
+        data.add_meta('plottr_decimated_records', nrecs)
+        data.add_meta('plottr_decimation_stride', stride)
+        data.add_meta('plottr_max_records_limit', max_records)
+
     ### Properties
 
     @property
@@ -383,8 +454,11 @@ class QCodesDSLoader(Node):
         if None not in self._pathAndId:
             path, runId = cast(Tuple[str, int], self._pathAndId)
 
-            if self._dataset is None:
-                self._dataset = load_dataset_from(path, runId)
+            # Reload the dataset handle on each refresh. In long-running live
+            # sessions, a cached DataSet object can occasionally stop reflecting
+            # appended rows, which stalls plotting until a run switch rebuilds
+            # the loader state.
+            self._dataset = load_dataset_from(path, runId)
 
             if self._dataset.number_of_results > self.nLoadedRecords:
 
@@ -407,6 +481,7 @@ Finished: {completed_timestamp}
 DB-File [ID]: {path} [{runId}]"""
 
                 data = ds_to_datadict(self._dataset)
+                self._decimate_for_display(data)
 
                 data.add_meta('qcodes_experiment_name', experiment_name)
                 data.add_meta('qcodes_sample_name', sample_name)

@@ -6,7 +6,7 @@ from typing import Optional, Tuple, NoReturn
 import numpy as np
 import pyqtgraph as pg
 
-from plottr import QtCore, QtWidgets, Signal, config_entry
+from plottr import QtCore, QtGui, QtWidgets, Signal, config_entry
 
 __all__ = ['PlotBase', 'Plot']
 
@@ -39,7 +39,22 @@ class PlotBase(QtWidgets.QWidget):
 
         #: ``pyqtgraph`` plot item
         self.plot: pg.PlotItem = self.graphicsLayout.addPlot()
+        self._applyDefaultTextStyle()
         self.plot.scene().sigMouseMoved.connect(self._onMouseMoved)
+
+    def _applyDefaultTextStyle(self) -> None:
+        tick_pt = int(config_entry('main', 'pyqtgraph', 'axis_font_size_pt', default=11))
+        label_pt = int(config_entry('main', 'pyqtgraph', 'axis_label_size_pt', default=12))
+        font = QtGui.QFont()
+        font.setPointSize(max(7, tick_pt))
+
+        for side in ['left', 'bottom', 'right', 'top']:
+            axis = self.plot.getAxis(side)
+            axis.setStyle(tickFont=font, autoExpandTextSpace=True)
+            try:
+                axis.label.setAttr('size', f'{max(8, label_pt)}pt')
+            except Exception:
+                pass
 
     def _onMouseMoved(self, pos: QtCore.QPointF) -> None:
         if not self.plot.vb.sceneBoundingRect().contains(pos):
@@ -89,6 +104,15 @@ class PlotWithColorbar(PlotBase):
         self.colorbar: pg.ColorBarItem = pg.ColorBarItem(interactive=True, values=(0, 1),
                                                          colorMap=cmap, width=15)
         self.graphicsLayout.addItem(self.colorbar)
+        tick_pt = int(config_entry('main', 'pyqtgraph', 'axis_font_size_pt', default=11))
+        label_pt = int(config_entry('main', 'pyqtgraph', 'axis_label_size_pt', default=12))
+        font = QtGui.QFont()
+        font.setPointSize(max(7, tick_pt))
+        self.colorbar.axis.setStyle(tickFont=font, autoExpandTextSpace=True)
+        try:
+            self.colorbar.axis.label.setAttr('size', f'{max(8, label_pt)}pt')
+        except Exception:
+            pass
 
         self.img: Optional[pg.ImageItem] = None
         self.scatter: Optional[pg.ScatterPlotItem] = None
@@ -162,14 +186,22 @@ class PlotWithColorbar(PlotBase):
         :param z: data values (as 2D meshgrid)
         :return: None
         """
-        self.clearPlot()
-
-        self.img = pg.ImageItem()
-        self.plot.addItem(self.img)
-
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
         z_arr = np.asarray(z)
+
+        reuse_img = (
+            self.img is not None and
+            self.scatter is None and
+            self.imageZVals is not None and
+            self.imageZVals.shape == z_arr.shape
+        )
+
+        if not reuse_img:
+            self.clearPlot()
+            self.img = pg.ImageItem()
+            self.plot.addItem(self.img)
+            self.colorbar.setImageItem(self.img)
 
         self.img.setImage(z_arr)
         x_finite = x_arr[np.isfinite(x_arr)]
@@ -184,8 +216,16 @@ class PlotWithColorbar(PlotBase):
             self.img.setRect(rect)
             self.imageRect = rect
 
-        self.imageZVals = np.asarray(z_arr)
-        if x_arr.ndim == 2 and y_arr.ndim == 2 and x_arr.shape == z_arr.shape and y_arr.shape == z_arr.shape:
+        # Keep hover caches memory-efficient: full 2D x/y grids are only
+        # retained for moderately sized images where irregular-grid hover
+        # benefits outweigh memory cost.
+        self.imageZVals = self.img.image
+        max_hover_cells = int(config_entry('main', 'pyqtgraph', 'cursor_full_grid_cache_max_cells', default=300000))
+        if (
+            x_arr.ndim == 2 and y_arr.ndim == 2 and
+            x_arr.shape == z_arr.shape and y_arr.shape == z_arr.shape and
+            z_arr.size <= max_hover_cells
+        ):
             self.imageXGrid = np.asarray(x_arr, dtype=float)
             self.imageYGrid = np.asarray(y_arr, dtype=float)
         else:
@@ -202,15 +242,15 @@ class PlotWithColorbar(PlotBase):
         else:
             self.imageYVals = np.asarray(y_arr, dtype=float).reshape(-1)
 
-        self.colorbar.setImageItem(self.img)
         z_min = float(np.nanmin(z))
         z_max = float(np.nanmax(z))
         if not np.isfinite(z_min) or not np.isfinite(z_max) or z_min == z_max:
             z_min, z_max = 0.0, 1.0
         self.colorbar.rounding = (z_max - z_min) * 1e-2
         self.colorbar.setLevels((z_min, z_max))
-        self.plot.enableAutoRange(axis='xy', enable=True)
-        self.plot.autoRange()
+        if not reuse_img:
+            self.plot.enableAutoRange(axis='xy', enable=True)
+            self.plot.autoRange()
 
     def setScatter2d(self, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> None:
         """Set data to be plotted as image.
@@ -223,8 +263,6 @@ class PlotWithColorbar(PlotBase):
         :param z: data values
         :return: None
         """
-        self.clearPlot()
-
         x_flat = x.flatten()
         y_flat = y.flatten()
         z_flat = z.flatten()
@@ -238,9 +276,14 @@ class PlotWithColorbar(PlotBase):
             y_flat = y_flat[::stride]
             z_flat = z_flat[::stride]
 
-        self.scatter = pg.ScatterPlotItem()
+        reuse_scatter = (self.scatter is not None and self.img is None)
+        if not reuse_scatter:
+            self.clearPlot()
+            self.scatter = pg.ScatterPlotItem()
+            self.plot.addItem(self.scatter)
+            self.colorbar.sigLevelsChanged.connect(self._colorScatterPoints)
+
         self.scatter.setData(x=x_flat, y=y_flat, symbol='o', size=10, pen=None)
-        self.plot.addItem(self.scatter)
         self.scatterXVals = x_flat
         self.scatterYVals = y_flat
         self.scatterZVals = z_flat
@@ -253,9 +296,9 @@ class PlotWithColorbar(PlotBase):
         self.colorbar.rounding = (z_max - z_min) * 1e-2
         self._colorScatterPoints(self.colorbar)
 
-        self.colorbar.sigLevelsChanged.connect(self._colorScatterPoints)
-        self.plot.enableAutoRange(axis='xy', enable=True)
-        self.plot.autoRange()
+        if not reuse_scatter:
+            self.plot.enableAutoRange(axis='xy', enable=True)
+            self.plot.autoRange()
 
     # TODO: this seems crazy slow.
     def _colorScatterPoints(self, cbar: pg.ColorBarItem) -> None:
