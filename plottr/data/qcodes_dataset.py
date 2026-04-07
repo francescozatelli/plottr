@@ -5,6 +5,7 @@ Dealing with qcodes dataset (the database) data in plottr.
 """
 import os
 import sqlite3
+import logging
 from datetime import datetime
 from itertools import chain
 from operator import attrgetter
@@ -31,6 +32,8 @@ from ..node.node import Node, updateOption
 
 __author__ = 'Wolfgang Pfaff'
 __license__ = 'MIT'
+
+LOGGER = logging.getLogger('plottr.data.qcodes_dataset')
 
 if TYPE_CHECKING:
     try:
@@ -368,6 +371,8 @@ class QCodesDSLoader(Node):
         self._pathAndId: Tuple[Optional[str], Optional[int]] = (None, None)
         self.nLoadedRecords = 0
         self._dataset: Optional[DataSetProtocol] = None
+        self._diag_refresh_count = 0
+        self._diag_last_rss_mb: Optional[float] = None
 
         super().__init__(*arg, **kw)
 
@@ -434,6 +439,77 @@ class QCodesDSLoader(Node):
         data.add_meta('plottr_decimation_stride', stride)
         data.add_meta('plottr_max_records_limit', max_records)
 
+    def _estimate_datadict_bytes(self, data: DataDictBase) -> int:
+        total = 0
+        for _name, field in data.data_items():
+            vals = np.asarray(field.get('values', []))
+            total += int(vals.nbytes)
+        return total
+
+    def _log_memory_diag(
+        self,
+        path: str,
+        run_id: int,
+        total_records: int,
+        data: DataDictBase,
+        rss_before_mb: Optional[float],
+        rss_after_mb: Optional[float],
+    ) -> None:
+        enabled = bool(config_entry('main', 'qcodes', 'memory_diagnostic_logging', default=False))
+        if not enabled:
+            return
+
+        self._diag_refresh_count += 1
+        every_n = int(config_entry('main', 'qcodes', 'memory_diagnostic_every_n_refreshes', default=1))
+        every_n = max(1, every_n)
+        if (self._diag_refresh_count % every_n) != 0:
+            self._diag_last_rss_mb = rss_after_mb
+            return
+
+        payload_mb = self._estimate_datadict_bytes(data) / (1024.0 * 1024.0)
+        guard_mode = 'normal'
+        if data.has_meta('plottr_memory_guard_mode'):
+            guard_mode = str(data.meta_val('plottr_memory_guard_mode') or 'normal')
+
+        stride = None
+        if data.has_meta('plottr_decimation_stride'):
+            stride = data.meta_val('plottr_decimation_stride')
+        stride_text = '1'
+        if stride is not None:
+            try:
+                stride_text = str(int(stride))
+            except Exception:
+                stride_text = str(stride)
+
+        delta_load: Optional[float] = None
+        if rss_before_mb is not None and rss_after_mb is not None:
+            delta_load = rss_after_mb - rss_before_mb
+
+        delta_since_last: Optional[float] = None
+        if self._diag_last_rss_mb is not None and rss_after_mb is not None:
+            delta_since_last = rss_after_mb - self._diag_last_rss_mb
+
+        LOGGER.info(
+            (
+                'QCodesDSLoader memory diag | db=%s run=%s records=%s '
+                'payload=%.1fMB guard=%s stride=%s '
+                'rss_before=%s rss_after=%s delta_load=%s delta_prev=%s refresh_count=%s'
+            ),
+            os.path.basename(path),
+            run_id,
+            total_records,
+            payload_mb,
+            guard_mode,
+            stride_text,
+            'n/a' if rss_before_mb is None else f'{rss_before_mb:.1f}MB',
+            'n/a' if rss_after_mb is None else f'{rss_after_mb:.1f}MB',
+            'n/a' if delta_load is None else f'{delta_load:+.1f}MB',
+            'n/a' if delta_since_last is None else f'{delta_since_last:+.1f}MB',
+            self._diag_refresh_count,
+        )
+
+        self._diag_last_rss_mb = rss_after_mb
+
     ### Properties
 
     @property
@@ -453,6 +529,7 @@ class QCodesDSLoader(Node):
             raise RuntimeError("QCodesDSLoader.process does not take a dataIn argument")
         if None not in self._pathAndId:
             path, runId = cast(Tuple[str, int], self._pathAndId)
+            rss_before_mb = self._rss_mb()
 
             # Reload the dataset handle on each refresh. In long-running live
             # sessions, a cached DataSet object can occasionally stop reflecting
@@ -499,6 +576,15 @@ DB-File [ID]: {path} [{runId}]"""
                 data.add_meta('qcodes_shape', qcodes_shape)
 
                 self.nLoadedRecords = self._dataset.number_of_results
+                rss_after_mb = self._rss_mb()
+                self._log_memory_diag(
+                    path=path,
+                    run_id=runId,
+                    total_records=self._dataset.number_of_results,
+                    data=data,
+                    rss_before_mb=rss_before_mb,
+                    rss_after_mb=rss_after_mb,
+                )
 
                 return dict(dataOut=data)
 

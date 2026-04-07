@@ -321,6 +321,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self._embeddedFlowchart: Optional[Flowchart] = None
         self._embeddedPlotWindow: Optional[QCAutoPlotMainWindow] = None
         self._plottedRunId: Optional[int] = None
+        self._suppressSelectionPlot: bool = False
 
         self.filepath = dbPath
         self.dbdf: Optional[pandas.DataFrame] = None
@@ -458,7 +459,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self.dateList.datesSelected.connect(self.setDateSelection)
         self.dateList.fileDropped.connect(self.loadFullDB)
         self.runList.runSelected.connect(self.setRunSelection)
-        self.runList.runSelected.connect(self.plotRun)
+        self.runList.runSelected.connect(self._plotSelectedRun)
         self.runList.runActivated.connect(self.plotRun)
         self._sendInfo.connect(self.runInfo.setInfo)
         self.monitor.timeout.connect(self.monitorTriggered)
@@ -691,8 +692,13 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             self.dbdf.loc[~self.dbdf.index.isin(dbdf_delta.index)],
             dbdf_delta,
         ]).sort_index()
-        self.dbdfUpdated.emit()
-        self.dateList.sendSelectedDates()
+
+        self._suppressSelectionPlot = True
+        try:
+            self.dbdfUpdated.emit()
+            self.dateList.sendSelectedDates()
+        finally:
+            self._suppressSelectionPlot = False
 
         new_ids = dbdf_delta.index.values
         new_ids = new_ids[new_ids > latest_run_id]
@@ -747,6 +753,12 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         selection_dict = cast(Dict[int, Dict[str,str]], selection.to_dict(orient='index'))
         self.runList.setRuns(selection_dict, show_only_star, show_also_cross)
 
+    @Slot(int)
+    def _plotSelectedRun(self, runId: int) -> None:
+        if self._suppressSelectionPlot:
+            return
+        self.plotRun(runId)
+
     ### handling user selections
     @Slot(list)
     def setDateSelection(self, dates: Sequence[str]) -> None:
@@ -754,6 +766,14 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             assert self.dbdf is not None
             selection = self.dbdf.loc[self.dbdf['started_date'].isin(dates)].sort_index(ascending=False)
             old_dates = self._selected_dates
+            prev_selected_run_id: Optional[int] = None
+            selected_items = self.runList.selectedItems()
+            if len(selected_items) > 0:
+                prev_selected_run_id = int(selected_items[0].text(0))
+
+            # Internal run-list refreshes should not trigger re-plot via
+            # runSelected. Re-enable signals after list update is stable.
+            signals_were_blocked = self.runList.blockSignals(True)
             # Pandas types cannot infer that this dataframe will be
             # using int as index and Dict[str, str] as keys
             selection_dict = cast(Dict[int, Dict[str,str]], selection.to_dict(orient='index'))
@@ -763,6 +783,13 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
                 self.runList.setRuns(selection_dict, show_only_star, show_also_cross)
             else:
                 self.runList.updateRuns(selection_dict)
+
+            if prev_selected_run_id is not None:
+                existing = self.runList.findItems(str(prev_selected_run_id), QtCore.Qt.MatchExactly)
+                if len(existing) > 0:
+                    self.runList.setCurrentItem(existing[0])
+
+            self.runList.blockSignals(signals_were_blocked)
             self._selected_dates = tuple(dates)
         else:
             self._selected_dates = ()
