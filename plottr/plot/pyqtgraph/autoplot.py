@@ -376,6 +376,7 @@ class FigureMaker(BaseFM):
 
         subPlot = self.subPlotFromId(plotItem.subPlot)
         self._clearCoupledSecondaryAxes(subPlot)
+        self._applyUnscaledAxisInfo(subPlot, plotItem.plotOptions)
 
         assert len(plotItem.data) == 2
         x, y = plotItem.data
@@ -459,6 +460,7 @@ class FigureMaker(BaseFM):
         subPlot = self.subPlotFromId(plotItem.subPlot)
         assert isinstance(subPlot, PlotWithColorbar) and len(plotItem.data) == 3
         self._clearCoupledSecondaryAxes(subPlot)
+        self._applyUnscaledAxisInfo(subPlot, plotItem.plotOptions)
         x, y, z = plotItem.data
         x = np.asarray(x)
         y = np.asarray(y)
@@ -597,6 +599,7 @@ class FigureMaker(BaseFM):
         subPlot = self.subPlotFromId(plotItem.subPlot)
         assert isinstance(subPlot, PlotWithColorbar) and len(plotItem.data) == 3
         self._clearCoupledSecondaryAxes(subPlot)
+        self._applyUnscaledAxisInfo(subPlot, plotItem.plotOptions)
         assert not self.complexRepresentation == ComplexRepresentation.log_MagAndPhase
         x, y, z = plotItem.data
 
@@ -706,6 +709,25 @@ class FigureMaker(BaseFM):
         try:
             subPlot.plot.getAxis('top').setTicks([[]])
             subPlot.plot.getAxis('right').setTicks([[]])
+        except Exception:
+            pass
+
+    def _applyUnscaledAxisInfo(self, subPlot: PlotBase, plotOptions: Optional[dict]) -> None:
+        info = {}
+        if isinstance(plotOptions, dict):
+            info = plotOptions.get('unscaledAxisInfo', {})
+        if not isinstance(info, dict):
+            info = {}
+
+        try:
+            subPlot.setUnscaledAxisInfo(
+                xScaleExponent=int(info.get('xScaleExponent', 0)),
+                yScaleExponent=int(info.get('yScaleExponent', 0)),
+                xRawUnit=str(info.get('xRawUnit', '')),
+                yRawUnit=str(info.get('yRawUnit', '')),
+                xRawName=str(info.get('xRawName', 'x')),
+                yRawName=str(info.get('yRawName', 'y')),
+            )
         except Exception:
             pass
 
@@ -1262,6 +1284,7 @@ class AutoPlot(PlotWidget):
             return
 
         coupled_info: Optional[object] = None
+        axis_scale_info: dict[str, Any] = {}
         if self.data.has_meta('coupled_secondary_axis'):
             try:
                 info = self.data.meta_val('coupled_secondary_axis')
@@ -1269,6 +1292,13 @@ class AutoPlot(PlotWidget):
                     coupled_info = info
             except Exception:
                 coupled_info = None
+        if self.data.has_meta('axis_scale_info'):
+            try:
+                info = self.data.meta_val('axis_scale_info')
+                if isinstance(info, dict):
+                    axis_scale_info = info
+            except Exception:
+                axis_scale_info = {}
 
         with FigureMaker(parentWidget=self, widget=self.fmWidget,
                          **kwargs) as fm:
@@ -1287,6 +1317,27 @@ class AutoPlot(PlotWidget):
                 inds = self.data.axes(dep)
                 dvals = self.data.data_vals(dep)
                 pdt = determinePlotDataType(self.data.extract([dep]))
+
+                def _axis_info(name: str) -> tuple[int, str, str]:
+                    axis_info = axis_scale_info.get(name, {})
+                    if not isinstance(axis_info, dict):
+                        axis_info = {}
+                    scale = int(axis_info.get('scale', 0))
+                    data_field = self.data.get(name, {}) if isinstance(self.data, dict) else {}
+                    if not isinstance(data_field, dict):
+                        data_field = {}
+                    fallback_unit = str(data_field.get('unit', ''))
+                    raw_unit = str(axis_info.get('unit_raw', fallback_unit))
+                    # Prefer plain field label (without unit suffix) for clipboard output.
+                    field_label = str(data_field.get('label', '')).strip()
+                    raw_name = field_label if field_label else str(name)
+                    return scale, raw_unit, raw_name
+
+                x_name = inds[0] if len(inds) > 0 else dep
+                y_name = inds[1] if len(inds) > 1 else dep
+                x_scale, x_raw_unit, x_raw_name = _axis_info(x_name)
+                y_scale, y_raw_unit, y_raw_name = _axis_info(y_name)
+
                 dep_coupled_info: Optional[object] = None
                 if isinstance(coupled_info, dict):
                     primary_axis = coupled_info.get('primary_axis')
@@ -1307,6 +1358,14 @@ class AutoPlot(PlotWidget):
                     labels=[str(self.data.label(n)) for n in inds] + [str(self.data.label(dep))],
                     plotDataType=pdt,
                     coupledSecondaryAxis=dep_coupled_info,
+                    unscaledAxisInfo={
+                        'xScaleExponent': x_scale,
+                        'yScaleExponent': y_scale,
+                        'xRawUnit': x_raw_unit,
+                        'yRawUnit': y_raw_unit,
+                        'xRawName': x_raw_name,
+                        'yRawName': y_raw_name,
+                    },
                 )
 
         if self.fmWidget is None:

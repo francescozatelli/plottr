@@ -125,9 +125,11 @@ class ScaleUnits(Node):
         data = dataIn.copy()
 
         axis_scales: Dict[str, int] = {}
+        axis_scale_info: Dict[str, Dict[str, Any]] = {}
 
         if self.scale_unit_option != ScaleUnitsOption.never:
             for name, data_item in data.data_items():
+                raw_unit = str(data_item.get("unit", ""))
                 prefix, selected_scale = find_scale_and_prefix(
                     data_item['values'],
                     data_item["unit"]
@@ -135,6 +137,11 @@ class ScaleUnits(Node):
                 data_item["unit"] = prefix + data_item["unit"]
                 data_item['values'] = data_item['values'] * 10**(-selected_scale)
                 axis_scales[name] = selected_scale
+                axis_scale_info[name] = {
+                    'scale': int(selected_scale),
+                    'unit_raw': raw_unit,
+                    'unit_scaled': str(data_item.get('unit', '')),
+                }
 
             # Keep coupled secondary-axis metadata in sync with scaled axes.
             if data.has_meta('coupled_secondary_axis'):
@@ -189,5 +196,8 @@ class ScaleUnits(Node):
                     data.add_meta('coupled_secondary_axis', updated)
                 elif len(updated) > 0:
                     data.add_meta('coupled_secondary_axis', updated[0])
+
+        if len(axis_scale_info) > 0:
+            data.add_meta('axis_scale_info', axis_scale_info)
 
         return dict(dataOut=data)

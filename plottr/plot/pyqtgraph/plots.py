@@ -39,8 +39,18 @@ class PlotBase(QtWidgets.QWidget):
 
         #: ``pyqtgraph`` plot item
         self.plot: pg.PlotItem = self.graphicsLayout.addPlot()
+        self._xScaleExponent: int = 0
+        self._yScaleExponent: int = 0
+        self._xRawUnit: str = ''
+        self._yRawUnit: str = ''
+        self._xRawName: str = 'x'
+        self._yRawName: str = 'y'
+        self._lastCursorX: Optional[float] = None
+        self._lastCursorY: Optional[float] = None
         self._applyDefaultTextStyle()
         self.plot.scene().sigMouseMoved.connect(self._onMouseMoved)
+        self.plot.scene().sigMouseClicked.connect(self._onMouseClicked)
+        self._installCopyCoordsAction()
 
     def _applyDefaultTextStyle(self) -> None:
         tick_pt = int(config_entry('main', 'pyqtgraph', 'axis_font_size_pt', default=11))
@@ -60,7 +70,67 @@ class PlotBase(QtWidgets.QWidget):
         if not self.plot.vb.sceneBoundingRect().contains(pos):
             return
         mouse_point = self.plot.vb.mapSceneToView(pos)
-        self.cursorPositionChanged.emit(self, float(mouse_point.x()), float(mouse_point.y()), None)
+        x = float(mouse_point.x())
+        y = float(mouse_point.y())
+        self._lastCursorX = x
+        self._lastCursorY = y
+        self.cursorPositionChanged.emit(self, x, y, None)
+
+    def setUnscaledAxisInfo(
+        self,
+        xScaleExponent: int = 0,
+        yScaleExponent: int = 0,
+        xRawUnit: str = '',
+        yRawUnit: str = '',
+        xRawName: str = 'x',
+        yRawName: str = 'y',
+    ) -> None:
+        self._xScaleExponent = int(xScaleExponent)
+        self._yScaleExponent = int(yScaleExponent)
+        self._xRawUnit = str(xRawUnit)
+        self._yRawUnit = str(yRawUnit)
+        self._xRawName = str(xRawName)
+        self._yRawName = str(yRawName)
+
+    def _installCopyCoordsAction(self) -> None:
+        self._copyCoordsAction = QtWidgets.QAction('Copy x, y', self)
+        self._copyCoordsAction.triggered.connect(self._copyUnscaledCoordinates)
+        try:
+            self.plot.vb.menu.addSeparator()
+            self.plot.vb.menu.addAction(self._copyCoordsAction)
+        except Exception:
+            pass
+
+    def _onMouseClicked(self, ev: object) -> None:
+        try:
+            if ev.button() != QtCore.Qt.RightButton:
+                return
+            pos = ev.scenePos()
+            if not self.plot.vb.sceneBoundingRect().contains(pos):
+                return
+            mouse_point = self.plot.vb.mapSceneToView(pos)
+            self._lastCursorX = float(mouse_point.x())
+            self._lastCursorY = float(mouse_point.y())
+        except Exception:
+            return
+
+    def _copyUnscaledCoordinates(self) -> None:
+        if self._lastCursorX is None or self._lastCursorY is None:
+            return
+
+        x_unscaled = float(self._lastCursorX) * (10 ** int(self._xScaleExponent))
+        y_unscaled = float(self._lastCursorY) * (10 ** int(self._yScaleExponent))
+
+        x_label = self._xRawName or 'x'
+        y_label = self._yRawName or 'y'
+        x_unit = f' {self._xRawUnit}' if self._xRawUnit else ''
+        y_unit = f' {self._yRawUnit}' if self._yRawUnit else ''
+
+        text = (
+            f'{x_label}: {x_unscaled:.12g}{x_unit}\n'
+            f'{y_label}: {y_unscaled:.12g}{y_unit}'
+        )
+        QtWidgets.QApplication.clipboard().setText(text)
 
     def clearPlot(self) -> None:
         """Clear all plot contents (but do not delete plot elements, like axis
@@ -376,6 +446,8 @@ class PlotWithColorbar(PlotBase):
         mouse_point = self.plot.vb.mapSceneToView(pos)
         x = float(mouse_point.x())
         y = float(mouse_point.y())
+        self._lastCursorX = x
+        self._lastCursorY = y
         z_val: Optional[float] = None
 
         if self.imageZVals is not None and self.imageXVals is not None and self.imageYVals is not None:
