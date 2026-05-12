@@ -322,6 +322,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self._embeddedPlotWindow: Optional[QCAutoPlotMainWindow] = None
         self._plottedRunId: Optional[int] = None
         self._suppressSelectionPlot: bool = False
+        self._pendingSelectionRestore: Dict[str, Any] = {}
         self._runSwitchRetryCount: int = 0
 
         self.filepath = dbPath
@@ -932,6 +933,22 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if win.loaderNode is None:
             return
 
+        previous_selected: List[str] = []
+        previous_roles: Dict[str, Any] = {}
+        previous_signature: Dict[str, Tuple[str, ...]] = {}
+        try:
+            data_sel_node = win.fc.nodes()['Data selection']
+            previous_selected = list(getattr(data_sel_node, 'selectedData', []))
+            dim_node = win.fc.nodes()['Dimension assignment']
+            previous_roles = dict(getattr(dim_node, 'dimensionRoles', {}))
+            prev_data = cast(Optional[DataDictBase], win.fc.outputValues().get('dataOut'))
+            if prev_data is not None:
+                previous_signature = {dep: tuple(prev_data.axes(dep)) for dep in prev_data.dependents()}
+        except Exception:
+            previous_selected = []
+            previous_roles = {}
+            previous_signature = {}
+
         try:
             win.fc.nodes()['Dimension assignment'].dimensionRoles = {}
             win.fc.nodes()['Data selection'].selectedData = []
@@ -958,6 +975,12 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         # Defer the expensive refresh until the event loop returns so the GUI
         # can repaint the newly selected run immediately.
         QtCore.QTimer.singleShot(0, lambda win=win, runId=runId: self._finishPlotRun(win, runId))
+
+        self._pendingSelectionRestore = {
+            'selected': previous_selected,
+            'roles': previous_roles,
+            'signature': previous_signature,
+        }
 
     def _finishPlotRun(self, win: QCAutoPlotMainWindow, runId: int) -> None:
         if self._plottedRunId != runId:
@@ -990,7 +1013,29 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-            win.setDefaults(data_out)
+            reused = False
+            try:
+                restore = getattr(self, '_pendingSelectionRestore', None)
+                if isinstance(restore, dict):
+                    prev_sig = restore.get('signature', {})
+                    new_sig = {dep: tuple(data_out.axes(dep)) for dep in data_out.dependents()}
+                    if prev_sig and prev_sig == new_sig:
+                        selected = [d for d in restore.get('selected', []) if d in data_out.dependents()]
+                        if len(selected) > 0:
+                            win.fc.nodes()['Data selection'].selectedData = selected
+                            axes = data_out.axes(selected[0]) if len(selected) > 0 else []
+                            roles = {
+                                k: v for k, v in restore.get('roles', {}).items()
+                                if k in axes
+                            }
+                            if len(roles) > 0:
+                                win.fc.nodes()['Dimension assignment'].dimensionRoles = roles
+                            reused = True
+            except Exception:
+                reused = False
+
+            if not reused:
+                win.setDefaults(data_out)
             win._initialized = True
 
         QtCore.QTimer.singleShot(
