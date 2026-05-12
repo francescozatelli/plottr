@@ -927,15 +927,12 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         win.refreshData()
         self.showDBPath()
 
-    def _dataVariableSignature(self, data: Optional[DataDictBase]) -> Optional[Tuple[Tuple[str, Tuple[str, ...]], ...]]:
+    def _dataVariableSignature(self, data: Optional[DataDictBase]) -> Optional[Tuple[str, ...]]:
         if data is None:
             return None
 
         try:
-            return tuple(
-                (dep, tuple(data.axes(dep)))
-                for dep in data.dependents()
-            )
+            return tuple(sorted(data.dependents()))
         except Exception:
             return None
 
@@ -946,13 +943,26 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
                 raw_data = win.loaderNode.outputValues().get('dataOut')
         except Exception:
             raw_data = None
+        try:
+            data_sel_node = win.fc.nodes()['Data selection']
+            if raw_data is None:
+                raw_data = data_sel_node.dataStructure
+        except Exception:
+            data_sel_node = None
 
         selected: List[str] = []
         roles: Dict[str, Any] = {}
         try:
-            selected = list(win.fc.nodes()['Data selection'].selectedData)
+            if data_sel_node is not None:
+                selected = list(data_sel_node.selectedData)
         except Exception:
             selected = []
+        if len(selected) == 0:
+            try:
+                if data_sel_node is not None and data_sel_node.ui is not None:
+                    selected = list(data_sel_node.ui.getSelected())
+            except Exception:
+                selected = []
         try:
             roles = dict(win.fc.nodes()['Dimension assignment'].dimensionRoles)
         except Exception:
@@ -984,8 +994,12 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             return False
 
         try:
-            win.fc.nodes()['Data selection'].selectedData = selected
-            win.fc.nodes()['Dimension assignment'].dimensionRoles = roles
+            data_sel_node = win.fc.nodes()['Data selection']
+            dim_node = win.fc.nodes()['Dimension assignment']
+            data_sel_node.selectedData = selected
+            dim_node.dimensionRoles = roles
+            data_sel_node.update()
+            dim_node.update()
         except Exception:
             return False
 
@@ -1000,6 +1014,12 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
         self._pendingPlotSelectionState = self._capturePlotSelectionState(win)
 
+        try:
+            win.fc.nodes()['Dimension assignment'].dimensionRoles = {}
+            win.fc.nodes()['Data selection'].selectedData = []
+        except Exception:
+            pass
+
         # When switching runs, force a fresh dataset load so data-field
         # dependent UIs (data selection and dimension assignment) are rebuilt.
         if self._plottedRunId != runId:
@@ -1007,7 +1027,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             win.loaderNode._dataset = None
 
         win.loaderNode.pathAndId = (self.filepath, runId)
-        win._initialized = len(self._pendingPlotSelectionState.get('selected', [])) > 0
+        win._initialized = False
 
         try:
             win.plot.setData(None)
