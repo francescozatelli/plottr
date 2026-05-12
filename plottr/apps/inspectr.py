@@ -898,6 +898,26 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
         win.loaderNode.pathAndId = (self.filepath, runId)
         win._initialized = False
+
+        try:
+            win.plot.setData(None)
+        except Exception:
+            pass
+
+        self._plottedRunId = runId
+        self.showDBPath()
+
+        # Defer the expensive refresh until the event loop returns so the GUI
+        # can repaint the newly selected run immediately.
+        QtCore.QTimer.singleShot(0, lambda win=win, runId=runId: self._finishPlotRun(win, runId))
+
+    def _finishPlotRun(self, win: QCAutoPlotMainWindow, runId: int) -> None:
+        if self._plottedRunId != runId:
+            return
+
+        if win.loaderNode is None:
+            return
+
         win.refreshData()
         data_out = win.loaderNode.outputValues().get('dataOut')
 
@@ -906,7 +926,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if data_out is None and win.loaderNode._dataset is not None:
             data_out = ds_to_datadict(win.loaderNode._dataset)
 
-        if data_out is not None:
+        if data_out is not None and self._plottedRunId == runId:
             shapes = data_out.shapes()
             dtype = type(data_out)
             try:
@@ -924,10 +944,26 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
             win.setDefaults(data_out)
             win._initialized = True
-        win.showTime()
 
-        self._plottedRunId = runId
-        self.showDBPath()
+        try:
+            plotted_data = win.fc.outputValues().get('dataOut')
+        except Exception:
+            plotted_data = None
+
+        if plotted_data is None:
+            plotted_data = data_out
+
+        if plotted_data is not None:
+            try:
+                win.plot.setData(plotted_data)
+            except Exception:
+                pass
+            if win.plotWidget is not None:
+                try:
+                    win.plotWidget.update()
+                except Exception:
+                    pass
+        win.showTime()
 
     def setTag(self, item: QtWidgets.QTreeWidgetItem, tag: str) -> None:
         # set tag in the database
