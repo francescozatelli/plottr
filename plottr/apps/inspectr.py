@@ -945,25 +945,50 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             win.setDefaults(data_out)
             win._initialized = True
 
+        QtCore.QTimer.singleShot(
+            0,
+            lambda win=win, runId=runId, data_out=data_out: self._syncPlotAfterRunSwitch(win, runId, data_out),
+        )
+        win.showTime()
+
+    def _syncPlotAfterRunSwitch(
+        self,
+        win: QCAutoPlotMainWindow,
+        runId: int,
+        fallback_data: Optional[DataDictBase],
+    ) -> None:
+        if self._plottedRunId != runId or win.plotWidget is None:
+            return
+
         try:
             plotted_data = win.fc.outputValues().get('dataOut')
         except Exception:
             plotted_data = None
 
         if plotted_data is None:
-            plotted_data = data_out
+            plotted_data = fallback_data
 
-        if plotted_data is not None:
-            try:
-                win.plot.setData(plotted_data)
-            except Exception:
-                pass
-            if win.plotWidget is not None:
-                try:
-                    win.plotWidget.update()
-                except Exception:
-                    pass
-        win.showTime()
+        if plotted_data is None:
+            return
+
+        try:
+            win.plot.setData(plotted_data)
+        except Exception:
+            pass
+
+        try:
+            win.plotWidget.setData(plotted_data)
+        except Exception:
+            pass
+
+        try:
+            update_plot = getattr(win.plotWidget, 'updatePlot', None)
+            if callable(update_plot):
+                update_plot()
+            else:
+                win.plotWidget.update()
+        except Exception:
+            pass
 
     def setTag(self, item: QtWidgets.QTreeWidgetItem, tag: str) -> None:
         # set tag in the database
