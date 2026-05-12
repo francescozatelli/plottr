@@ -322,6 +322,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self._embeddedPlotWindow: Optional[QCAutoPlotMainWindow] = None
         self._plottedRunId: Optional[int] = None
         self._suppressSelectionPlot: bool = False
+        self._runSwitchRetryCount: int = 0
 
         self.filepath = dbPath
         self.dbdf: Optional[pandas.DataFrame] = None
@@ -617,16 +618,63 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             return
 
         newest = int(max(new_ids))
+        target_run = newest
+
+        # Prefer runs that are likely plottable (non-empty date and records > 0)
+        # to avoid auto-selecting just-created/corrupted entries that leave a stale plot.
+        if self.dbdf is not None:
+            for rid in sorted((int(r) for r in new_ids), reverse=True):
+                if rid not in self.dbdf.index:
+                    continue
+                started_date = str(self.dbdf.at[rid, 'started_date']).strip()
+                records = self.dbdf.at[rid, 'records']
+                try:
+                    nrecs = int(records)
+                except Exception:
+                    nrecs = 0
+                if started_date != '' and nrecs > 0:
+                    target_run = rid
+                    break
 
         # Ensure the newest run date is part of the active date filter so the
         # item becomes selectable in the list immediately.
-        if self.dbdf is not None and newest in self.dbdf.index:
-            started_date = str(self.dbdf.at[newest, 'started_date'])
+        if self.dbdf is not None and target_run in self.dbdf.index:
+            started_date = str(self.dbdf.at[target_run, 'started_date'])
             if started_date not in self._selected_dates:
                 self.setDateSelection(tuple(sorted(set(self._selected_dates + (started_date,)))))
 
-        if not self._selectRunInList(newest):
-            self.plotRun(newest)
+        LOGGER.debug(
+            'Auto-plot new runs candidate selection: newest=%s target=%s new_ids=%s',
+            newest,
+            target_run,
+            new_ids,
+        )
+
+        if not self._selectRunInList(target_run):
+            self.plotRun(target_run)
+
+    def _teardownEmbeddedPlotWindow(self) -> None:
+        if self._embeddedPlotWindow is None:
+            return
+
+        try:
+            self.plotPanelLayout.removeWidget(self._embeddedPlotWindow)
+        except Exception:
+            pass
+        try:
+            self._embeddedPlotWindow.hide()
+            self._embeddedPlotWindow.setParent(None)
+            self._embeddedPlotWindow.deleteLater()
+        except Exception:
+            pass
+
+        self._embeddedPlotWindow = None
+        self._embeddedFlowchart = None
+
+    def _forceRebuildAndPlotRun(self, runId: int) -> None:
+        LOGGER.warning('Forcing embedded plot rebuild for run %s due to stale output mismatch.', runId)
+        self._teardownEmbeddedPlotWindow()
+        self.plotRun(runId)
 
     def DBLoaded(self, dbdf: pandas.DataFrame) -> None:
         if self.dbdf is not None and dbdf.equals(self.dbdf):
@@ -970,6 +1018,26 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
         if plotted_data is None:
             return
+
+        plotted_run_id: Optional[int] = None
+        try:
+            if plotted_data.has_meta('qcodes_runId'):
+                plotted_run_id = int(cast(int, plotted_data.meta_val('qcodes_runId')))
+        except Exception:
+            plotted_run_id = None
+
+        if plotted_run_id is not None and plotted_run_id != runId:
+            LOGGER.warning(
+                'Stale plot detected: selected run=%s but flowchart output run=%s',
+                runId,
+                plotted_run_id,
+            )
+            if self._runSwitchRetryCount < 1:
+                self._runSwitchRetryCount += 1
+                QtCore.QTimer.singleShot(0, lambda runId=runId: self._forceRebuildAndPlotRun(runId))
+            return
+
+        self._runSwitchRetryCount = 0
 
         try:
             win.plot.setData(plotted_data)
