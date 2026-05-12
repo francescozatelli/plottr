@@ -17,7 +17,7 @@ import time
 import sys
 import argparse
 import logging
-from typing import Optional, Sequence, List, Dict, Iterable, Union, cast, Tuple, Mapping, Set, Any
+from typing import Optional, Sequence, List, Dict, Iterable, Union, cast, Tuple, Mapping, Set
 
 from typing_extensions import TypedDict
 
@@ -36,7 +36,6 @@ from ..data.qcodes_dataset import (get_runs_from_db_as_dataframe,
                                    get_runs_from_db_as_dataframe_filtered,
                                    get_ds_structure, load_dataset_from,
                                    ds_to_datadict)
-from ..data.datadict import DataDictBase
 from plottr.gui.widgets import MonitorIntervalInput, FormLayoutWrapper, dictToTreeWidgetItems
 
 from .autoplot import autoplotQcodesDataset, QCAutoPlotMainWindow
@@ -324,7 +323,6 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self._plottedRunId: Optional[int] = None
         self._suppressSelectionPlot: bool = False
         self._runSwitchRetryCount: int = 0
-        self._pendingPlotSelectionState: Optional[Dict[str, Any]] = None
 
         self.filepath = dbPath
         self.dbdf: Optional[pandas.DataFrame] = None
@@ -927,70 +925,6 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         win.refreshData()
         self.showDBPath()
 
-    def _dataVariableSignature(self, data: Optional[DataDictBase]) -> Optional[Tuple[Tuple[str, Tuple[str, ...]], ...]]:
-        if data is None:
-            return None
-
-        try:
-            return tuple(
-                (dep, tuple(data.axes(dep)))
-                for dep in data.dependents()
-            )
-        except Exception:
-            return None
-
-    def _capturePlotSelectionState(self, win: QCAutoPlotMainWindow) -> Dict[str, Any]:
-        raw_data = None
-        try:
-            if win.loaderNode is not None:
-                raw_data = win.loaderNode.outputValues().get('dataOut')
-        except Exception:
-            raw_data = None
-
-        selected: List[str] = []
-        roles: Dict[str, Any] = {}
-        try:
-            selected = list(win.fc.nodes()['Data selection'].selectedData)
-        except Exception:
-            selected = []
-        try:
-            roles = dict(win.fc.nodes()['Dimension assignment'].dimensionRoles)
-        except Exception:
-            roles = {}
-
-        return {
-            'signature': self._dataVariableSignature(raw_data),
-            'selected': selected,
-            'roles': roles,
-        }
-
-    def _restorePlotSelectionIfCompatible(
-        self,
-        win: QCAutoPlotMainWindow,
-        data: Optional[DataDictBase],
-    ) -> bool:
-        state = self._pendingPlotSelectionState
-        if state is None or data is None:
-            return False
-
-        old_signature = state.get('signature')
-        new_signature = self._dataVariableSignature(data)
-        selected = list(state.get('selected', []))
-        roles = dict(state.get('roles', {}))
-
-        if old_signature is None or old_signature != new_signature:
-            return False
-        if len(selected) == 0 or not all(dep in data.dependents() for dep in selected):
-            return False
-
-        try:
-            win.fc.nodes()['Data selection'].selectedData = selected
-            win.fc.nodes()['Dimension assignment'].dimensionRoles = roles
-        except Exception:
-            return False
-
-        return True
-
     @Slot(int)
     def plotRun(self, runId: int) -> None:
         assert self.filepath is not None
@@ -998,7 +932,11 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if win.loaderNode is None:
             return
 
-        self._pendingPlotSelectionState = self._capturePlotSelectionState(win)
+        try:
+            win.fc.nodes()['Dimension assignment'].dimensionRoles = {}
+            win.fc.nodes()['Data selection'].selectedData = []
+        except Exception:
+            pass
 
         # When switching runs, force a fresh dataset load so data-field
         # dependent UIs (data selection and dimension assignment) are rebuilt.
@@ -1007,7 +945,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             win.loaderNode._dataset = None
 
         win.loaderNode.pathAndId = (self.filepath, runId)
-        win._initialized = len(self._pendingPlotSelectionState.get('selected', [])) > 0
+        win._initialized = False
 
         try:
             win.plot.setData(None)
@@ -1052,13 +990,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-            if not self._restorePlotSelectionIfCompatible(win, data_out):
-                try:
-                    win.fc.nodes()['Dimension assignment'].dimensionRoles = {}
-                    win.fc.nodes()['Data selection'].selectedData = []
-                except Exception:
-                    pass
-                win.setDefaults(data_out)
+            win.setDefaults(data_out)
             win._initialized = True
 
         QtCore.QTimer.singleShot(
