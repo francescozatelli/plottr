@@ -320,14 +320,37 @@ class PlotWithColorbar(PlotBase):
             self.colorbar.setImageItem(self.img)
 
         self.img.setImage(z_arr)
-        x_finite = x_arr[np.isfinite(x_arr)]
-        y_finite = y_arr[np.isfinite(y_arr)]
-        if x_finite.size > 0 and y_finite.size > 0:
+        def _finite_extent(vals: np.ndarray) -> Optional[Tuple[float, float]]:
+            finite = vals[np.isfinite(vals)]
+            if finite.size == 0:
+                return None
+
+            lo = float(finite.min())
+            hi = float(finite.max())
+            if hi > lo:
+                return lo, hi
+
+            unique = np.unique(finite)
+            if unique.size > 1:
+                diffs = np.diff(np.sort(unique))
+                step = float(np.nanmedian(np.abs(diffs[diffs > 0])))
+            else:
+                step = 1.0
+
+            if not np.isfinite(step) or step <= 0:
+                step = 1.0
+            return lo - step / 2.0, hi + step / 2.0
+
+        x_extent = _finite_extent(x_arr)
+        y_extent = _finite_extent(y_arr)
+        if x_extent is not None and y_extent is not None:
+            x_lo, x_hi = x_extent
+            y_lo, y_hi = y_extent
             rect = QtCore.QRectF(
-                float(x_finite.min()),
-                float(y_finite.min()),
-                float(x_finite.max() - x_finite.min()),
-                float(y_finite.max() - y_finite.min())
+                x_lo,
+                y_lo,
+                x_hi - x_lo,
+                y_hi - y_lo,
             )
             self.img.setRect(rect)
             self.imageRect = rect
