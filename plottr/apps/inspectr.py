@@ -925,12 +925,46 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         win.refreshData()
         self.showDBPath()
 
+    def _dependent_signature(self, data: Optional[DataDictBase]) -> Dict[str, Tuple[str, ...]]:
+        if data is None:
+            return {}
+        sig: Dict[str, Tuple[str, ...]] = {}
+        try:
+            for dep in data.dependents():
+                sig[str(dep)] = tuple(str(ax) for ax in data.axes(dep))
+        except Exception:
+            return {}
+        return sig
+
+    def _can_reuse_selection(
+        self,
+        previous_signature: Dict[str, Tuple[str, ...]],
+        new_data: DataDictBase,
+    ) -> bool:
+        return previous_signature != {} and previous_signature == self._dependent_signature(new_data)
+
     @Slot(int)
     def plotRun(self, runId: int) -> None:
         assert self.filepath is not None
         win = self._ensureEmbeddedPlotWindow(runId)
         if win.loaderNode is None:
             return
+
+        previous_data: Optional[DataDictBase] = None
+        previous_selected: List[str] = []
+        previous_roles: Dict[str, Any] = {}
+        previous_signature: Dict[str, Tuple[str, ...]] = {}
+        try:
+            previous_data = cast(Optional[DataDictBase], win.fc.outputValues().get('dataOut'))
+            data_sel_node = win.fc.nodes()['Data selection']
+            previous_selected = list(getattr(data_sel_node, 'selectedData', []))
+            dim_node = win.fc.nodes()['Dimension assignment']
+            previous_roles = dict(getattr(dim_node, 'dimensionRoles', {}))
+            previous_signature = self._dependent_signature(previous_data)
+        except Exception:
+            previous_selected = []
+            previous_roles = {}
+            previous_signature = {}
 
         try:
             win.fc.nodes()['Dimension assignment'].dimensionRoles = {}
@@ -957,9 +991,21 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
         # Defer the expensive refresh until the event loop returns so the GUI
         # can repaint the newly selected run immediately.
-        QtCore.QTimer.singleShot(0, lambda win=win, runId=runId: self._finishPlotRun(win, runId))
+        QtCore.QTimer.singleShot(
+            0,
+            lambda win=win, runId=runId, previous_selected=previous_selected,
+                   previous_roles=previous_roles, previous_signature=previous_signature:
+                self._finishPlotRun(win, runId, previous_selected, previous_roles, previous_signature),
+        )
 
-    def _finishPlotRun(self, win: QCAutoPlotMainWindow, runId: int) -> None:
+    def _finishPlotRun(
+        self,
+        win: QCAutoPlotMainWindow,
+        runId: int,
+        previous_selected: List[str],
+        previous_roles: Dict[str, Any],
+        previous_signature: Dict[str, Tuple[str, ...]],
+    ) -> None:
         if self._plottedRunId != runId:
             return
 
@@ -990,7 +1036,24 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-            win.setDefaults(data_out)
+            reused = False
+            if self._can_reuse_selection(previous_signature, data_out):
+                try:
+                    reusable_selected = [d for d in previous_selected if d in data_out.dependents()]
+                    if len(reusable_selected) > 0:
+                        win.fc.nodes()['Data selection'].selectedData = reusable_selected
+                        reusable_roles = {
+                            k: v for k, v in previous_roles.items()
+                            if k in data_out.axes(reusable_selected[0])
+                        }
+                        if len(reusable_roles) > 0:
+                            win.fc.nodes()['Dimension assignment'].dimensionRoles = reusable_roles
+                        reused = True
+                except Exception:
+                    reused = False
+
+            if not reused:
+                win.setDefaults(data_out)
             win._initialized = True
 
         QtCore.QTimer.singleShot(
