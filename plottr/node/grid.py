@@ -451,28 +451,6 @@ class DataGridder(Node[DataGridderNodeWidget]):
 
         return True
 
-    def _metadata_target_shape(self, data: DataDict) -> Optional[Tuple[int, ...]]:
-        """Extract target grid shape from qcodes metadata when available."""
-        if not data.has_meta('qcodes_shape'):
-            return None
-
-        try:
-            shape_meta = data.meta_val('qcodes_shape')
-        except Exception:
-            return None
-
-        if not isinstance(shape_meta, dict):
-            return None
-
-        for dep in data.dependents():
-            dep_shape = shape_meta.get(dep)
-            if isinstance(dep_shape, tuple) and len(dep_shape) >= 2:
-                try:
-                    return tuple(int(v) for v in dep_shape)
-                except Exception:
-                    continue
-        return None
-
     def process(
             self,
             dataIn: Optional[DataDictBase] = None
@@ -512,19 +490,9 @@ class DataGridder(Node[DataGridderNodeWidget]):
                     )
                 elif method is GridOption.metadataShape:
                     try:
-                        target_shape = self._metadata_target_shape(data)
-                        if target_shape is not None:
-                            # Use full metadata shape so partial acquisitions
-                            # are visible immediately with NaN-filled remainder.
-                            dout = dd.datadict_to_meshgrid(
-                                data,
-                                target_shape=target_shape,
-                            )
-                        else:
-                            # Fallback for datasets without metadata shape.
-                            dout = dd.datadict_to_meshgrid(
-                                data, use_existing_shape=True
-                            )
+                        dout = dd.datadict_to_meshgrid(
+                            data, use_existing_shape=True
+                        )
                     except ValueError as err:
                         if "Malformed data" in str(err):
                             self.node_logger.warning(
