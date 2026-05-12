@@ -465,47 +465,6 @@ class DataGridder(Node[DataGridderNodeWidget]):
         if dataIn is None:
             return None
 
-        def _ordered_unique(self, vals: np.ndarray) -> List[float]:
-            ordered: List[float] = []
-            seen: set[float] = set()
-            for v in vals:
-                if not np.isfinite(v):
-                    continue
-                fv = float(v)
-                if fv in seen:
-                    continue
-                seen.add(fv)
-                ordered.append(fv)
-            return ordered
-
-        def _build_axis_grid(
-            self,
-            data: DataDict,
-            axes: List[str],
-            target_shape: Tuple[int, ...],
-        ) -> Dict[str, np.ndarray]:
-            axis_grids: Dict[str, np.ndarray] = {}
-            if len(axes) != len(target_shape):
-                return axis_grids
-
-            axis_vectors: List[np.ndarray] = []
-            for ax, dim in zip(axes, target_shape):
-                vals = np.asarray(data.data_vals(ax), dtype=float).reshape(-1)
-                uniq = self._ordered_unique(vals)
-                if len(uniq) == 0:
-                    vec = np.zeros(dim, dtype=float)
-                elif len(uniq) >= dim:
-                    vec = np.asarray(uniq[:dim], dtype=float)
-                else:
-                    pad = np.full(dim - len(uniq), uniq[-1], dtype=float)
-                    vec = np.concatenate([np.asarray(uniq, dtype=float), pad])
-                axis_vectors.append(vec)
-
-            mesh = np.meshgrid(*axis_vectors, indexing='ij')
-            for name, grid in zip(axes, mesh):
-                axis_grids[name] = grid
-            return axis_grids
-
         data = super().process(dataIn=dataIn)
         if data is None:
             return None
@@ -531,21 +490,9 @@ class DataGridder(Node[DataGridderNodeWidget]):
                     )
                 elif method is GridOption.metadataShape:
                     try:
-                        target_shape = self._metadata_target_shape(data)
-                        if target_shape is not None:
-                            # Use full metadata shape so partial acquisitions
-                            # are visible immediately with NaN-filled remainder.
-                            dout = dd.datadict_to_meshgrid(data, target_shape=target_shape)
-                            axlist = data.axes(data.dependents()[0])
-                            axis_grids = self._build_axis_grid(data, list(axlist), target_shape)
-                            for ax, grid in axis_grids.items():
-                                if ax in dout:
-                                    dout[ax]['values'] = grid
-                        else:
-                            # Fallback for datasets without metadata shape.
-                            dout = dd.datadict_to_meshgrid(
-                                data, use_existing_shape=True
-                            )
+                        dout = dd.datadict_to_meshgrid(
+                            data, use_existing_shape=True
+                        )
                     except ValueError as err:
                         if "Malformed data" in str(err):
                             self.node_logger.warning(
