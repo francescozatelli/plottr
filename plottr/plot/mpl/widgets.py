@@ -17,6 +17,7 @@ from matplotlib.backends.backend_qt5agg import (
 from plottr import QtWidgets, QtGui, QtCore, config as plottrconfig
 from plottr.data.datadict import DataDictBase
 from plottr.gui.tools import widgetDialog, dpiScalingFactor
+from plottr.plot.clipboard import copy_image_to_clipboard
 from ..base import PlotWidget, PlotWidgetContainer
 
 
@@ -113,8 +114,7 @@ class MPLPlot(FCanvas):
         self.fig.savefig(buf, dpi=150, facecolor='w', format='png',
                          transparent=True)
 
-        clipboard = QtWidgets.QApplication.clipboard()
-        clipboard.setImage(QtGui.QImage.fromData(buf.getvalue()))
+        copy_image_to_clipboard(QtGui.QImage.fromData(buf.getvalue()))
         buf.close()
 
     def metaToClipboard(self) -> None:
@@ -193,7 +193,9 @@ class MPLPlotWidget(PlotWidget):
         infoAction.toggled.connect(self.plot.setShowInfo)
 
         self.mplBar.addSeparator()
-        self.mplBar.addAction('Copy Figure', self.plot.toClipboard)
+        copyAction = self.mplBar.addAction('Copy Figure', self.plot.toClipboard)
+        copyAction.setShortcut(QtGui.QKeySequence.Copy)
+        copyAction.setShortcutContext(QtCore.Qt.WindowShortcut)
         self.mplBar.addAction('Copy Meta', self.plot.metaToClipboard)
 
 

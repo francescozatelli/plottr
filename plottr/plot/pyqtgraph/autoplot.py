@@ -19,9 +19,10 @@ from typing import List, Optional, Any
 import numpy as np
 from pyqtgraph import mkPen
 
-from plottr import QtWidgets, QtCore, Signal, Slot, \
+from plottr import QtWidgets, QtCore, QtGui, Signal, Slot, \
     config_entry as getcfg
 from plottr.data.datadict import DataDictBase
+from plottr.plot.clipboard import copy_image_to_clipboard
 from .plots import Plot, PlotWithColorbar, PlotBase
 from ..base import AutoFigureMaker as BaseFM, PlotDataType, \
     PlotItem, ComplexRepresentation, determinePlotDataType, \
@@ -1457,8 +1458,7 @@ class AutoPlot(PlotWidget):
         """
         assert isinstance(self.fmWidget, FigureWidget)
         screenshot = self.fmWidget.grab(rectangle=QtCore.QRect(QtCore.QPoint(0, 0), QtCore.QSize(-1, -1)))
-        clipboard = QtWidgets.QApplication.clipboard()
-        clipboard.setImage(screenshot.toImage())
+        copy_image_to_clipboard(screenshot.toImage())
 
     @Slot()
     def onfigSaved(self) -> None:
@@ -1638,6 +1638,8 @@ class FigureConfigToolBar(QtWidgets.QToolBar):
         
         # Adding functionality to copy and save the graph
         self.copyFig = self.addAction('Copy Figure', self._copyFig)
+        self.copyFig.setShortcut(QtGui.QKeySequence.Copy)
+        self.copyFig.setShortcutContext(QtCore.Qt.WindowShortcut)
         self.saveFig = self.addAction('Save Figure', self._saveFig)
 
         spacer = QtWidgets.QWidget(parent=self)
