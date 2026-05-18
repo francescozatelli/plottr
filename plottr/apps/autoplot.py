@@ -333,9 +333,20 @@ class AutoPlotMainWindow(PlotWindow):
             drs = {axes[0]: 'x-axis'}
 
         try:
-            self.fc.nodes()['Data selection'].selectedData = selected
-            self.fc.nodes()['Grid'].grid = GridOption.guessShape, {}
-            self.fc.nodes()['Dimension assignment'].dimensionRoles = drs
+            data_node = self.fc.nodes()['Data selection']
+            grid_node = self.fc.nodes()['Grid']
+            dim_node = self.fc.nodes()['Dimension assignment']
+            grid_signal_state = grid_node.signalUpdate
+            grid_node.signalUpdate = False
+            try:
+                grid_node.grid = self.defaultGridOption(data), {}
+            finally:
+                grid_node.signalUpdate = grid_signal_state
+
+            # Selection populates downstream data/axis UIs. The dimension roles
+            # are applied after that, producing a single plotted output.
+            data_node.selectedData = selected
+            dim_node.dimensionRoles = drs
         # FIXME: this is maybe a bit excessive, but trying to set all the defaults
         #   like this can result in many types of errors.
         #   a better approach would be to inspect the data better and make sure
@@ -343,6 +354,9 @@ class AutoPlotMainWindow(PlotWindow):
         except:
             pass
         unwrap_optional(self.plotWidget).update()
+
+    def defaultGridOption(self, data: DataDictBase) -> GridOption:
+        return GridOption.guessShape
 
 
 class QCAutoPlotMainWindow(AutoPlotMainWindow):
@@ -376,13 +390,14 @@ class QCAutoPlotMainWindow(AutoPlotMainWindow):
 
     def setDefaults(self, data: DataDictBase) -> None:
         super().setDefaults(data)
+
+    def defaultGridOption(self, data: DataDictBase) -> GridOption:
         import qcodes as qc
         qcodes_support = (version.parse(qc.__version__) >=
                           version.parse("0.20.0"))
         if data.meta_val('qcodes_shape') is not None and qcodes_support:
-            self.fc.nodes()['Grid'].grid = GridOption.metadataShape, {}
-        else:
-            self.fc.nodes()['Grid'].grid = GridOption.guessShape, {}
+            return GridOption.metadataShape
+        return GridOption.guessShape
 
 
 def autoplotQcodesDataset(log: bool = False,

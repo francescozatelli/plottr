@@ -7,7 +7,7 @@ from typing import List, Tuple, Dict, Any, Sequence, Optional
 
 import numpy as np
 
-from .node import Node, NodeWidget, updateOption
+from .node import Node, NodeWidget, updateOption, updateGuiFromNode
 from ..data.datadict import DataDictBase, DataDict
 from ..gui.data_display import DataSelectionWidget
 from plottr.icons import get_dataColumnsIcon
@@ -36,6 +36,7 @@ class DataDisplayWidget(NodeWidget):
         self.widget.dataSelectionMade.connect(
             lambda x: self.signalOption('selectedData'))
 
+    @updateGuiFromNode
     def setSelected(self, vals: Sequence[str]) -> None:
         assert self.widget is not None
         self.widget.setSelectedData(vals)

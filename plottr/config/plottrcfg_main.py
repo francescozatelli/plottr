@@ -38,6 +38,7 @@ config = {
                         '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'],
         'line_symbols': ['o', ],
         'line_symbol_size': 7,
+        'line_symbol_max_points': 2000,
         'axis_font_size_pt': 11,
         'axis_label_size_pt': 11,
         'title_font_size_pt': 10,

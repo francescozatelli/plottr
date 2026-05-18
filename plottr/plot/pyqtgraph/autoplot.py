@@ -372,6 +372,7 @@ class FigureMaker(BaseFM):
         colors = getcfg('main', 'pyqtgraph', 'line_colors', default=['r', 'b', 'g'])
         symbols = getcfg('main', 'pyqtgraph', 'line_symbols', default=['o'])
         symbolSize = getcfg('main', 'pyqtgraph', 'line_symbol_size', default=5)
+        symbol_max_points = int(getcfg('main', 'pyqtgraph', 'line_symbol_max_points', default=2000))
         max_line_points = getcfg('main', 'pyqtgraph', 'adaptive_1d_max_points', default=200000)
         max_scatter_points = getcfg('main', 'pyqtgraph', 'adaptive_scatter_max_points', default=80000)
 
@@ -419,6 +420,10 @@ class FigureMaker(BaseFM):
             x = x[::stride]
             y = y[::stride]
 
+        line_symbol = symbol
+        if symbol_max_points >= 0 and x.size > symbol_max_points:
+            line_symbol = None
+
         # Use explicit finite ranges for robust autoscaling across pyqtgraph versions.
         finite = np.isfinite(x) & np.isfinite(y)
         x_rng = None
@@ -432,7 +437,7 @@ class FigureMaker(BaseFM):
         #plot either line or scatter depending on what graph is being requested
         if plotItem.plotDataType in [PlotDataType.line1d, PlotDataType.log10_line1d]:
             curve = subPlot.plot.plot(x, y, name=name,
-                                      pen=mkPen(color, width=1), symbol=symbol, symbolBrush=color,
+                                      pen=mkPen(color, width=1), symbol=line_symbol, symbolBrush=color,
                                       symbolPen=None, symbolSize=symbolSize)
             curve.setClipToView(True)
             curve.setDownsampling(auto=True, method='peak')

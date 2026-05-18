@@ -59,16 +59,20 @@ class DataSelectionWidget(QtWidgets.QTreeWidget):
 
     def setData(self, structure: DataDictBase, shapes: dict) -> None:
         """Set data; populates the tree."""
-        if structure is not None:
-            self._dataShapes = shapes
-            self._dataStructure = structure
-        else:
-            self._dataShapes = {}
-            self._dataStructure = DataDictBase()
+        signals_were_blocked = self.blockSignals(True)
+        try:
+            if structure is not None:
+                self._dataShapes = shapes
+                self._dataStructure = structure
+            else:
+                self._dataShapes = {}
+                self._dataStructure = DataDictBase()
 
-        self.clear()
-        if structure is not None:
-            self._populate()
+            self.clear()
+            if structure is not None:
+                self._populate()
+        finally:
+            self.blockSignals(signals_were_blocked)
 
     def setShape(self, shape: Dict[str, Tuple[int, ...]]) -> None:
         """Set shapes of given elements"""
@@ -108,8 +112,20 @@ class DataSelectionWidget(QtWidgets.QTreeWidget):
 
     def setSelectedData(self, vals: List[str]) -> None:
         """select all given items, uncheck all others."""
-        for n, w in self.dataItems.items():
-            w.setSelected(n in vals)
+        selected = set(vals)
+        changed = any(w.isSelected() != (n in selected)
+                      for n, w in self.dataItems.items())
+        if not changed:
+            return
+
+        signals_were_blocked = self.blockSignals(True)
+        try:
+            for n, w in self.dataItems.items():
+                w.setSelected(n in selected)
+        finally:
+            self.blockSignals(signals_were_blocked)
+
+        self.emitSelection()
 
     def emitSelection(self) -> None:
         """emit the signal ``selectionChanged`` with the current selection"""

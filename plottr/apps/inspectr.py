@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - optional dependency
 from plottr import QtCore, QtWidgets, Signal, Slot, QtGui, Flowchart, config_entry
 
 from .. import log as plottrlog
+from ..data.datadict import DataDictBase
 from ..data.qcodes_dataset import (get_runs_from_db_as_dataframe,
                                    get_runs_from_db_as_dataframe_filtered,
                                    get_ds_structure, load_dataset_from,
@@ -933,8 +934,18 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             return
 
         try:
-            win.fc.nodes()['Dimension assignment'].dimensionRoles = {}
-            win.fc.nodes()['Data selection'].selectedData = []
+            dim_node = win.fc.nodes()['Dimension assignment']
+            data_node = win.fc.nodes()['Data selection']
+            nodes = [dim_node, data_node]
+            signal_states = [(node, node.signalUpdate) for node in nodes]
+            for node in nodes:
+                node.signalUpdate = False
+            try:
+                dim_node.dimensionRoles = {}
+                data_node.selectedData = []
+            finally:
+                for node, state in signal_states:
+                    node.signalUpdate = state
         except Exception:
             pass
 
@@ -944,7 +955,10 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             win.loaderNode.nLoadedRecords = 0
             win.loaderNode._dataset = None
 
-        win.loaderNode.pathAndId = (self.filepath, runId)
+        win.loaderNode._pathAndId = (self.filepath, runId)
+        win.loaderNode.nLoadedRecords = 0
+        win.loaderNode._dataset = None
+        win.loaderNode._cached_data = None
         win._initialized = False
 
         try:
@@ -953,6 +967,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             pass
 
         self._plottedRunId = runId
+        self._runSwitchRetryCount = 0
         self.showDBPath()
 
         # Defer the expensive refresh until the event loop returns so the GUI
@@ -974,7 +989,11 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if data_out is None and win.loaderNode._dataset is not None:
             data_out = ds_to_datadict(win.loaderNode._dataset)
 
-        if data_out is not None and self._plottedRunId == runId:
+        if (
+            data_out is not None
+            and self._plottedRunId == runId
+            and not self._plotWidgetShowsRun(win, runId)
+        ):
             shapes = data_out.shapes()
             dtype = type(data_out)
             try:
@@ -995,17 +1014,33 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
         QtCore.QTimer.singleShot(
             0,
-            lambda win=win, runId=runId, data_out=data_out: self._syncPlotAfterRunSwitch(win, runId, data_out),
+            lambda win=win, runId=runId: self._syncPlotAfterRunSwitch(win, runId),
         )
         win.showTime()
+
+    def _plotWidgetShowsRun(self, win: QCAutoPlotMainWindow, runId: int) -> bool:
+        if win.plotWidget is None:
+            return False
+        data = win.plotWidget.data
+        try:
+            return (
+                data is not None
+                and data.has_meta('qcodes_runId')
+                and int(cast(int, data.meta_val('qcodes_runId'))) == runId
+            )
+        except Exception:
+            return False
 
     def _syncPlotAfterRunSwitch(
         self,
         win: QCAutoPlotMainWindow,
         runId: int,
-        fallback_data: Optional[DataDictBase],
     ) -> None:
         if self._plottedRunId != runId or win.plotWidget is None:
+            return
+
+        if self._plotWidgetShowsRun(win, runId):
+            self._runSwitchRetryCount = 0
             return
 
         try:
@@ -1014,7 +1049,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             plotted_data = None
 
         if plotted_data is None:
-            plotted_data = fallback_data
+            return
 
         if plotted_data is None:
             return
@@ -1027,27 +1062,32 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             plotted_run_id = None
 
         if plotted_run_id is not None and plotted_run_id != runId:
+            if self._runSwitchRetryCount < 20:
+                self._runSwitchRetryCount += 1
+                QtCore.QTimer.singleShot(
+                    100,
+                    lambda win=win, runId=runId: self._syncPlotAfterRunSwitch(win, runId),
+                )
+                return
+
             LOGGER.warning(
                 'Stale plot detected: selected run=%s but flowchart output run=%s',
                 runId,
                 plotted_run_id,
             )
-            if self._runSwitchRetryCount < 1:
-                self._runSwitchRetryCount += 1
-                QtCore.QTimer.singleShot(0, lambda runId=runId: self._forceRebuildAndPlotRun(runId))
+            QtCore.QTimer.singleShot(0, lambda runId=runId: self._forceRebuildAndPlotRun(runId))
             return
 
         self._runSwitchRetryCount = 0
 
-        try:
-            win.plot.setData(plotted_data)
-        except Exception:
-            pass
+        if win.plotWidget.data is plotted_data:
+            return
 
-        try:
-            win.plotWidget.setData(plotted_data)
-        except Exception:
-            pass
+        if win.plot.data is not plotted_data:
+            try:
+                win.plot.setData(plotted_data)
+            except Exception:
+                pass
 
         try:
             update_plot = getattr(win.plotWidget, 'updatePlot', None)
