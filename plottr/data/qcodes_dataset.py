@@ -658,7 +658,21 @@ class QCodesDSLoader(Node):
             # sessions, a cached DataSet object can occasionally stop reflecting
             # appended rows, which stalls plotting until a run switch rebuilds
             # the loader state.
-            self._dataset = load_dataset_from(path, runId)
+            try:
+                self._dataset = load_dataset_from(path, runId)
+            except ValueError as exc:
+                if 'does not exist in the database' not in str(exc):
+                    raise
+                LOGGER.warning(
+                    'Ignoring stale qcodes run request: db=%s run=%s (%s)',
+                    path,
+                    runId,
+                    exc,
+                )
+                self._dataset = None
+                self._cached_data = None
+                self.nLoadedRecords = 0
+                return None
             load_finished = perf_counter()
 
             if self._dataset.number_of_results > self.nLoadedRecords:

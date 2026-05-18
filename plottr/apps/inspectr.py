@@ -585,6 +585,15 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
 
     def loadFullDB(self, path: Optional[str] = None) -> None:
         if path is not None and path != self.filepath:
+            if self.refreshDebounce.isActive():
+                self.refreshDebounce.stop()
+            self._teardownEmbeddedPlotWindow()
+            self._plottedRunId = None
+            self._runSwitchRetryCount = 0
+            self.dbdf = None
+            self._selected_dates = ()
+            self.runList.clear()
+            self.runInfo.clear()
             self.filepath = path
 
             # makes sure we treat a newly loaded file fresh and not as a
@@ -902,6 +911,8 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             return None
         try:
             ds = load_dataset_from(self.filepath, runId)
+            if ds.completed_timestamp() is None:
+                return None
             for name, spec in ds.paramspecs.items():
                 if getattr(spec, 'depends_on', '') != '':
                     return str(name)
@@ -932,6 +943,13 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         win = self._embeddedPlotWindow
         if win.loaderNode is None:
             return
+        loader_path, _loader_run = win.loaderNode.pathAndId
+        if (
+            loader_path is not None
+            and self.filepath is not None
+            and os.path.abspath(loader_path) != os.path.abspath(self.filepath)
+        ):
+            return
 
         # Do not reset defaults or selected variables; just pull newly appended
         # records for the currently visible run.
@@ -941,6 +959,10 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
     @Slot(int)
     def plotRun(self, runId: int) -> None:
         assert self.filepath is not None
+        if self.dbdf is not None and runId not in self.dbdf.index:
+            LOGGER.warning('Ignoring plot request for run %s absent from %s', runId, self.filepath)
+            return
+
         win = self._ensureEmbeddedPlotWindow(runId)
         if win.loaderNode is None:
             return
@@ -994,6 +1016,14 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             return
 
         if win.loaderNode is None:
+            return
+        loader_path, loader_run = win.loaderNode.pathAndId
+        if (
+            loader_run != runId
+            or loader_path is None
+            or self.filepath is None
+            or os.path.abspath(loader_path) != os.path.abspath(self.filepath)
+        ):
             return
 
         win.refreshData()
