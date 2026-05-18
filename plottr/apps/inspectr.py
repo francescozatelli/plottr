@@ -867,7 +867,7 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         if self._embeddedPlotWindow is None:
             # Keep monitor disabled here; inspectr handles refresh cycles.
             fc, win = autoplotQcodesDataset(
-                pathAndId=(self.filepath, runId),
+                pathAndId=None,
                 parent=self.plotPanel,
                 monitor=False,
                 showWindow=False,
@@ -896,6 +896,18 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         self.runList.setCurrentItem(items[0])
         self.runList.scrollToItem(items[0], QtWidgets.QAbstractItemView.PositionAtCenter)
         return True
+
+    def _defaultDependentForRun(self, runId: int) -> Optional[str]:
+        if self.filepath is None:
+            return None
+        try:
+            ds = load_dataset_from(self.filepath, runId)
+            for name, spec in ds.paramspecs.items():
+                if getattr(spec, 'depends_on', '') != '':
+                    return str(name)
+        except Exception:
+            return None
+        return None
 
     def _refreshEmbeddedPlot(self, updated_ids: Optional[Set[int]] = None) -> None:
         """Refresh currently embedded plot in place for live updates.
@@ -959,6 +971,9 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         win.loaderNode.nLoadedRecords = 0
         win.loaderNode._dataset = None
         win.loaderNode._cached_data = None
+        default_dep = self._defaultDependentForRun(runId)
+        if hasattr(win.loaderNode, 'setDependentFilter'):
+            win.loaderNode.setDependentFilter([default_dep] if default_dep is not None else None)
         win._initialized = False
 
         try:

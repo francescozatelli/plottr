@@ -324,7 +324,10 @@ def get_runs_from_db_as_dataframe_filtered(
 
 # Extracting data
 
-def ds_to_datadicts(ds: 'DataSetProtocol') -> Dict[str, DataDict]:
+def ds_to_datadicts(
+        ds: 'DataSetProtocol',
+        dependents: Optional[List[str]] = None,
+) -> Dict[str, DataDict]:
     """
     Make DataDicts from a qcodes DataSet.
 
@@ -335,14 +338,20 @@ def ds_to_datadicts(ds: 'DataSetProtocol') -> Dict[str, DataDict]:
                      axes.
     """
     ret = {}
+    dependent_filter = set(dependents or [])
     has_cache = hasattr(ds, 'cache')
-    if has_cache:
+    if has_cache and len(dependent_filter) == 0:
         pdata = ds.cache.data()
     else:
-        # qcodes < 0.17
-        pdata = ds.get_parameter_data()
+        if len(dependent_filter) > 0:
+            pdata = ds.get_parameter_data(*sorted(dependent_filter))
+        else:
+            # qcodes < 0.17
+            pdata = ds.get_parameter_data()
     for p, spec in ds.paramspecs.items():
         if spec.depends_on != '':
+            if len(dependent_filter) > 0 and p not in dependent_filter:
+                continue
             axes = spec.depends_on_
             data = dict()
             data[p] = dict(unit=spec.unit, label=spec.label, axes=axes, values=pdata[p][p])
@@ -358,7 +367,8 @@ def ds_to_datadicts(ds: 'DataSetProtocol') -> Dict[str, DataDict]:
 def ds_to_datadict_incremental(
     ds: 'DataSetProtocol',
     cached_data: Optional[DataDictBase] = None,
-    last_loaded_records: int = 0
+    last_loaded_records: int = 0,
+    dependents: Optional[List[str]] = None,
 ) -> Tuple[DataDictBase, int]:
     """
     Extract data from qcodes dataset, optionally appending to cached data.
@@ -380,7 +390,7 @@ def ds_to_datadict_incremental(
     
     # If cache exists and we have new records, try incremental merge
     if cached_data is not None and total_records > last_loaded_records:
-        ddicts = ds_to_datadicts(ds)
+        ddicts = ds_to_datadicts(ds, dependents=dependents)
         new_ddict = combine_datadicts(*[v for k, v in ddicts.items()])
         
         # Slice to keep only new records from the full extraction
@@ -436,13 +446,16 @@ def ds_to_datadict_incremental(
             pass
     
     # Full extraction (fallback or initial load)
-    ddicts = ds_to_datadicts(ds)
+    ddicts = ds_to_datadicts(ds, dependents=dependents)
     ddict = combine_datadicts(*[v for k, v in ddicts.items()])
     return ddict, total_records
 
 
-def ds_to_datadict(ds: 'DataSetProtocol') -> DataDictBase:
-    ddicts = ds_to_datadicts(ds)
+def ds_to_datadict(
+        ds: 'DataSetProtocol',
+        dependents: Optional[List[str]] = None,
+) -> DataDictBase:
+    ddicts = ds_to_datadicts(ds, dependents=dependents)
     ddict = combine_datadicts(*[v for k, v in ddicts.items()])
     return ddict
 
@@ -461,6 +474,7 @@ class QCodesDSLoader(Node):
         self._diag_refresh_count = 0
         self._diag_last_rss_mb: Optional[float] = None
         self._cached_data: Optional[DataDictBase] = None
+        self.dependentFilter: Optional[List[str]] = None
 
         super().__init__(*arg, **kw)
 
@@ -625,6 +639,13 @@ class QCodesDSLoader(Node):
             self._dataset = None
             self._cached_data = None
 
+    def setDependentFilter(self, dependents: Optional[List[str]]) -> None:
+        new_filter = None if dependents is None else list(dependents)
+        if new_filter != self.dependentFilter:
+            self.dependentFilter = new_filter
+            self.nLoadedRecords = 0
+            self._cached_data = None
+
     def process(self, dataIn: Optional[DataDictBase] = None) -> Optional[Dict[str, Any]]:
         if dataIn is not None:
             raise RuntimeError("QCodesDSLoader.process does not take a dataIn argument")
@@ -665,7 +686,8 @@ DB-File [ID]: {path} [{runId}]"""
                 data, self.nLoadedRecords = ds_to_datadict_incremental(
                     self._dataset,
                     cached_data=self._cached_data,
-                    last_loaded_records=max(0, self.nLoadedRecords)
+                    last_loaded_records=max(0, self.nLoadedRecords),
+                    dependents=self.dependentFilter,
                 )
                 extract_finished = perf_counter()
                 
