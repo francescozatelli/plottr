@@ -993,9 +993,8 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
         win.loaderNode.nLoadedRecords = 0
         win.loaderNode._dataset = None
         win.loaderNode._cached_data = None
-        default_dep = self._defaultDependentForRun(runId)
         if hasattr(win.loaderNode, 'setDependentFilter'):
-            win.loaderNode.setDependentFilter([default_dep] if default_dep is not None else None)
+            win.loaderNode.setDependentFilter(None)
         win._initialized = False
 
         try:
