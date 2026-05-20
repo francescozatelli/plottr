@@ -660,15 +660,74 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             new_ids,
         )
 
-        # Programmatic selection can be swallowed during date/list refreshes on
-        # some Qt event orderings. Select for UI state, but launch explicitly so
-        # auto-plot-new does not depend on the selection signal firing.
-        self._suppressSelectionPlot = True
+        if not self._selectRunInList(target_run):
+            self.plotRun(target_run)
+        self._scheduleAutoPlotRetry(target_run)
+
+    def _autoPlotRunReady(self, runId: int) -> bool:
+        win = self._embeddedPlotWindow
+        if win is None or win.loaderNode is None or win.plotWidget is None:
+            return False
+
+        if not self._plotWidgetShowsRun(win, runId):
+            return False
+
         try:
-            self._selectRunInList(target_run)
-        finally:
-            self._suppressSelectionPlot = False
-        self.plotRun(target_run)
+            data_node = win.fc.nodes()['Data selection']
+            selected = data_node.selectedData
+            if isinstance(selected, str):
+                selected = [selected]
+            if len(selected) == 0:
+                return False
+        except Exception:
+            return False
+
+        try:
+            dim_node = win.fc.nodes()['Dimension assignment']
+            roles = dim_node.dimensionRoles
+            if 'x-axis' not in roles.values():
+                return False
+        except Exception:
+            return False
+
+        return True
+
+    def _scheduleAutoPlotRetry(self, runId: int, attempt: int = 0) -> None:
+        max_attempts = int(config_entry('main', 'qcodes', 'auto_plot_new_max_retries', default=8))
+        delay_ms = int(config_entry('main', 'qcodes', 'auto_plot_new_retry_delay_ms', default=750))
+        max_attempts = max(0, max_attempts)
+        delay_ms = max(100, delay_ms)
+
+        QtCore.QTimer.singleShot(
+            delay_ms,
+            lambda runId=runId, attempt=attempt: self._retryAutoPlotNewRun(runId, attempt),
+        )
+
+    def _retryAutoPlotNewRun(self, runId: int, attempt: int) -> None:
+        if not self.autoLaunchPlots.elements['Auto-plot new'].isChecked():
+            return
+        if self.filepath is None or self.dbdf is None or runId not in self.dbdf.index:
+            return
+        selected_items = self.runList.selectedItems()
+        selected_run_id = None
+        if len(selected_items) > 0:
+            try:
+                selected_run_id = int(selected_items[0].text(0))
+            except Exception:
+                selected_run_id = None
+        if selected_run_id is not None and selected_run_id != runId:
+            return
+        if self._autoPlotRunReady(runId):
+            return
+
+        max_attempts = int(config_entry('main', 'qcodes', 'auto_plot_new_max_retries', default=8))
+        if attempt >= max(0, max_attempts):
+            LOGGER.debug('Auto-plot new run %s did not become ready after %s retries.', runId, attempt)
+            return
+
+        LOGGER.debug('Retrying auto-plot for new run %s; attempt %s.', runId, attempt + 1)
+        self.plotRun(runId)
+        self._scheduleAutoPlotRetry(runId, attempt + 1)
 
     def _teardownEmbeddedPlotWindow(self) -> None:
         if self._embeddedPlotWindow is None:

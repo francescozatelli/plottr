@@ -67,5 +67,7 @@ config = {
         'max_records_for_display_warning': 250000,
         'max_records_for_display_emergency': 100000,
         'plot_refresh_max_fps': 8.0,
+        'auto_plot_new_max_retries': 8,
+        'auto_plot_new_retry_delay_ms': 750,
     },
 }
