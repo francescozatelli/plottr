@@ -660,8 +660,15 @@ class QCodesDBInspector(QtWidgets.QMainWindow):
             new_ids,
         )
 
-        if not self._selectRunInList(target_run):
-            self.plotRun(target_run)
+        # Programmatic selection can be swallowed during date/list refreshes on
+        # some Qt event orderings. Select for UI state, but launch explicitly so
+        # auto-plot-new does not depend on the selection signal firing.
+        self._suppressSelectionPlot = True
+        try:
+            self._selectRunInList(target_run)
+        finally:
+            self._suppressSelectionPlot = False
+        self.plotRun(target_run)
 
     def _teardownEmbeddedPlotWindow(self) -> None:
         if self._embeddedPlotWindow is None:
